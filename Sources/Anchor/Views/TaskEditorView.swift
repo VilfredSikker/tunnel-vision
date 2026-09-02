@@ -14,6 +14,7 @@ struct TaskEditorView: View {
     @State private var presetID: UUID?
     @State private var overrides: [Rule]
     @State private var editingRules = false
+    @State private var visualPickNotice = ""
 
     init(model: AppState, task: TaskItem?) {
         self.model = model
@@ -124,6 +125,20 @@ struct TaskEditorView: View {
     @ViewBuilder
     private var allowlistSection: some View {
         VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Button {
+                    startVisualPicker()
+                } label: {
+                    Label("Pick windows & apps…", systemImage: "macwindow.on.rectangle")
+                        .font(.callout)
+                }
+                if !visualPickNotice.isEmpty {
+                    Text(visualPickNotice)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+            }
             if let preset = selectedPreset {
                 HStack {
                     Text("Allowlist from “\(preset.name)” — \(preset.rules.count) rule\(preset.rules.count == 1 ? "" : "s"), \(preset.mode.displayName.lowercased()) mode")
@@ -148,6 +163,44 @@ struct TaskEditorView: View {
                     .foregroundStyle(.secondary)
                 RulesEditorView(rules: $overrides)
             }
+        }
+    }
+
+    // MARK: Visual picker
+
+    /// The picker edits the complete allowlist. Because the result may remove
+    /// apps the preset allowed (no deny rules yet), the task materialises its
+    /// own copy and drops the preset reference — "what you see is what locks".
+    private func startVisualPicker() {
+        let baseRules: [Rule]
+        let startMode: Mode
+        if let presetID, let preset = model.presets.first(where: { $0.id == presetID }) {
+            baseRules = preset.rules + overrides
+            startMode = preset.mode
+        } else {
+            baseRules = overrides
+            startMode = model.settings.defaultMode
+        }
+        let hadPreset = presetID != nil
+        PickerOverlayPresenter.shared.present(
+            model: model,
+            initialRules: baseRules,
+            mode: startMode,
+            allowPresetSave: true
+        ) { [self] result in
+            guard let result else { return }
+            if let savedPresetID = result.savedPresetID {
+                presetID = savedPresetID
+                overrides = []
+                visualPickNotice = ""
+            } else {
+                presetID = nil
+                overrides = result.rules
+                visualPickNotice = hadPreset
+                    ? "Switched to a custom allowlist for this task — “\(result.mode.displayName)” applies as default mode."
+                    : "Custom allowlist — “\(result.mode.displayName)” mode applies from Settings."
+            }
+            editingRules = presetID == nil && !overrides.isEmpty
         }
     }
 

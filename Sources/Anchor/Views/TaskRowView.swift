@@ -42,7 +42,6 @@ struct TaskRowView: View {
         )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture(count: 2) { start() }
         .contextMenu { contextMenu }
         .onDrag {
             guard reorderable else { return NSItemProvider() }
@@ -128,11 +127,11 @@ struct TaskRowView: View {
 
     @ViewBuilder
     private var trailingAction: some View {
-        if model.phase == .work && isActive {
+        if isActive && model.phase == .work {
             Image(systemName: "timer")
                 .foregroundStyle(Theme.allowed)
                 .help("Running")
-        } else if model.phase == .paused && isActive && hovering {
+        } else if isActive && model.phase == .paused {
             Button {
                 model.togglePause()
             } label: {
@@ -142,13 +141,15 @@ struct TaskRowView: View {
             }
             .buttonStyle(.borderless)
             .help("Resume")
-        } else if hovering && !isDone && canStart {
+        } else if canStart && !isDone {
+            // Always-visible start affordance — starting a task must not
+            // depend on hover discovery or double-click.
             Button {
                 start()
             } label: {
-                Image(systemName: "play.circle")
+                Image(systemName: hovering ? "play.circle.fill" : "play.circle")
                     .font(.system(size: 17))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(hovering ? Theme.allowed : Color.secondary.opacity(0.75))
             }
             .buttonStyle(.borderless)
             .help("Start “\(task.title)”")

@@ -166,9 +166,20 @@ struct PresetsManagerView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Rules")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Text("Rules")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        pickVisually(for: preset)
+                    } label: {
+                        Label("Pick visually…", systemImage: "macwindow.on.rectangle")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.link)
+                    .help("Choose windows and apps for this preset with the picker overlay")
+                }
                 RulesEditorView(rules: Binding(
                     get: { draft?.rules ?? [] },
                     set: { draft?.rules = $0 }
@@ -204,6 +215,21 @@ struct PresetsManagerView: View {
         if let copy = model.duplicatePreset(id: preset.id) {
             selectedID = copy.id
             draft = copy
+        }
+    }
+
+    /// Opens the exposé overlay seeded with the preset's rules; the result
+    /// edits the unsaved draft (mode included).
+    private func pickVisually(for preset: Preset) {
+        PickerOverlayPresenter.shared.present(
+            model: model,
+            initialRules: preset.rules,
+            mode: preset.mode,
+            allowPresetSave: false
+        ) { [self] result in
+            guard let result else { return }
+            self.draft?.rules = result.rules
+            self.draft?.mode = result.mode
         }
     }
 }

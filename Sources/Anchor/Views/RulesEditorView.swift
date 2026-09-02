@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 /// Manual allowlist rule editor. Scope + pattern fields per row, with running
-/// apps offered for the bundle id. Used until the visual picker overlay lands.
+/// apps offered for the bundle id. Fallback to the visual picker overlay when
+/// no windows are open or a rule needs typing precision.
 struct RulesEditorView: View {
     @Binding var rules: [Rule]
 

@@ -13,10 +13,14 @@ final class StatusItemController: NSObject {
     private var outsideMonitor: Any?
     private var resignObserver: NSObjectProtocol?
 
+    /// The status item's window, for anchoring popovers and notices.
+    var statusButtonWindow: NSWindow? {
+        statusItem?.button?.window
+    }
+
     init(model: AppState) {
         self.model = model
-        super.init()
-        // Deterministic dismissal: we close on outside clicks, Esc and app
+        super.init()        // Deterministic dismissal: we close on outside clicks, Esc and app
         // deactivation ourselves. Relying on .transient auto-close re-opens
         // the popover when the status item itself is clicked (close-then-
         // toggle race).

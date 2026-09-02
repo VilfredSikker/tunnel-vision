@@ -54,7 +54,7 @@ struct SettingsView: View {
             }
 
             Section("Coming in the next build") {
-                Text("App enforcement (dark / closed / frozen), the visual picker overlay, hotkeys, launch at login and browsers to manage are next; their settings land here.")
+                Text("Per-window and per-URL discipline (window-level matching via Accessibility, site rules inside browsers), hotkeys, launch at login, browsers to manage, and picker support on every display are next; their settings land here.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

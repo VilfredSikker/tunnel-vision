@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 /// Phase of the session state machine.
 enum SessionPhase: Equatable, Sendable {
@@ -9,12 +10,24 @@ enum SessionPhase: Equatable, Sendable {
     case breakTime
 }
 
+/// Receives session-lock changes so the app enforcer can react without the
+/// model depending on AppKit.
+@MainActor
+protocol LockListener: AnyObject {
+    func lockStateChanged(active: Bool, rules: [Rule], mode: Mode)
+}
+
 /// Single source of truth: tasks, presets, settings, today's bookkeeping and
 /// the session engine. Everything is persisted as one JSON file in
 /// Application Support so it can be inspected or edited by hand.
 @MainActor
 @Observable
 final class AppState {
+    private static let log = Logger(subsystem: "com.anchor.timer", category: "engine")
+
+    /// App-enforcement hook. Weak: the enforcer outlives the model in the
+    /// app, and tests never set it.
+    weak var lockListener: LockListener?
     // MARK: Persisted data
 
     private(set) var tasks: [TaskItem] = []
@@ -44,6 +57,7 @@ final class AppState {
     private let clock: () -> Date
     private var tickTask: Task<Void, Never>?
     private let tickInterval: TimeInterval = 0.5
+    private var tickCount = 0
 
     /// - Parameters:
     ///   - fileURL: JSON archive location. Defaults to Application Support/Anchor/data.json.
@@ -172,6 +186,9 @@ final class AppState {
         tasks[index] = updated
         rememberPreset(task.presetID)
         persist()
+        if updated.id == activeTaskID, phase == .work || phase == .paused {
+            notifyLockChange()
+        }
     }
 
     func moveTask(id: TaskItem.ID, before targetID: TaskItem.ID?) {
@@ -222,6 +239,9 @@ final class AppState {
         tasks[index].presetID = presetID
         rememberPreset(presetID)
         persist()
+        if id == activeTaskID, phase == .work || phase == .paused {
+            notifyLockChange()
+        }
     }
 
     // MARK: - Presets
@@ -319,6 +339,8 @@ final class AppState {
         phase = .work
         rememberPreset(task.presetID)
         persist()
+        Self.log.info("session started: task=\(task.title, privacy: .public) duration=\(Int(self.workTotal))s mode=\(self.activePreset?.mode.displayName ?? "none", privacy: .public)")
+        notifyLockChange()
     }
 
     func pause() {
@@ -326,6 +348,7 @@ final class AppState {
         pausedRemaining = max(0, endsAt.timeIntervalSince(clock()))
         phase = .paused
         persist()
+        Self.log.info("session paused: remaining=\(Int(self.pausedRemaining ?? 0))s")
     }
 
     func resume() {
@@ -333,6 +356,7 @@ final class AppState {
         workEndsAt = clock().addingTimeInterval(remaining)
         phase = .work
         persist()
+        Self.log.info("session resumed: remaining=\(Int(remaining))s")
     }
 
     func togglePause() {
@@ -349,6 +373,8 @@ final class AppState {
         phase = .idle
         clearRun()
         persist()
+        Self.log.info("session stopped early")
+        notifyLockChange()
     }
 
     /// The "Done" action: checks the running task off and goes to the break.
@@ -369,6 +395,8 @@ final class AppState {
         phase = .idle
         nextTaskID = nil
         persist()
+        Self.log.info("break skipped")
+        notifyLockChange()
     }
 
     /// Backstop used by the tick loop; tests call it directly with a fake clock.
@@ -378,6 +406,8 @@ final class AppState {
         case .work:
             if let endsAt = workEndsAt, clock() >= endsAt {
                 completeWork(creditSession: true)
+            } else if tickCount % 30 == 0, let remaining = remainingSeconds {
+                Self.log.info("heartbeat: remaining=\(remaining)s")
             }
         case .breakTime:
             if let endsAt = breakEndsAt, clock() >= endsAt {
@@ -387,10 +417,13 @@ final class AppState {
                 if settings.soundOn {
                     SoundPlayer.breakEnd()
                 }
+                Self.log.info("break ended")
+                notifyLockChange()
             }
         case .idle, .paused:
             break
         }
+        tickCount += 1
     }
 
     // MARK: - Session internals
@@ -414,6 +447,8 @@ final class AppState {
         if settings.soundOn {
             SoundPlayer.sessionEnd()
         }
+        Self.log.info("session ended: credit=\(creditSession) counted=\(self.todayCount)")
+        notifyLockChange()
     }
 
     private func clearRun() {
@@ -442,6 +477,44 @@ final class AppState {
             return lastUsedPresetID
         }
         return codingPresetID
+    }
+
+    // MARK: - Lock notifications (app enforcement)
+
+    /// Tells the enforcer what the current session allows. Called after every
+    /// transition that can change the lock state or its rule set.
+    func notifyLockChange() {
+        guard let listener = lockListener else { return }
+        if (phase == .work || phase == .paused), let task = activeTask {
+            listener.lockStateChanged(
+                active: true,
+                rules: effectiveRules(for: task),
+                mode: activePreset?.mode ?? settings.defaultMode
+            )
+        } else {
+            listener.lockStateChanged(active: false, rules: [], mode: settings.defaultMode)
+        }
+    }
+
+    /// "Add to preset" from the blocked-app notice: appends a whole-app allow
+    /// rule to the running task's preset (or its own overrides for custom
+    /// tasks) so the app stops being blocked.
+    func allowInActiveTask(bundleID: String) {
+        guard let id = activeTaskID, let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        let bundle = bundleID.trimmingCharacters(in: .whitespaces)
+        guard !bundle.isEmpty else { return }
+        if let presetID = tasks[index].presetID,
+           let presetIndex = presets.firstIndex(where: { $0.id == presetID }) {
+            if !presets[presetIndex].rules.contains(where: { $0.bundleID == bundle }) {
+                presets[presetIndex].rules.append(Rule(bundleID: bundle))
+            }
+        } else {
+            if !tasks[index].overrides.contains(where: { $0.bundleID == bundle }) {
+                tasks[index].overrides.append(Rule(bundleID: bundle))
+            }
+        }
+        persist()
+        notifyLockChange()
     }
 
     // MARK: - Tick loop
