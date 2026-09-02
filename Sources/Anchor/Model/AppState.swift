@@ -154,6 +154,11 @@ final class AppState {
             overrides: overrides.filter(\.isComplete)
         )
         tasks.append(task)
+        if phase == .breakTime {
+            // A task added during a break can become the new "next up" (e.g.
+            // when everything else was already done).
+            recomputeNextTask()
+        }
         rememberPreset(presetID)
         persist()
         return task

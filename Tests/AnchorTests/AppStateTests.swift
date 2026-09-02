@@ -232,7 +232,7 @@ final class AppStateTests: XCTestCase {
 
     func testSkipToBreakDoesNotCredit() {
         let state = makeState()
-        let (a, b) = seedTwoTasks(in: state)
+        let (a, _) = seedTwoTasks(in: state)
         state.startTask(id: a.id)
         state.skipToBreak()
         XCTAssertEqual(state.phase, .breakTime)
