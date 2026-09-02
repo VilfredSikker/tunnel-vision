@@ -227,7 +227,13 @@ final class StatusItemController: NSObject {
         alert.addButton(withTitle: "End Session")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
-        while alert.runModal() == .alertFirstButtonReturn {
+        // NSAlert does not focus accessory views on its own; without this the
+        // first keystrokes land on the buttons and the loop never sees text.
+        alert.window.initialFirstResponder = field
+        while true {
+            let response = alert.runModal()
+            if response != .alertFirstButtonReturn { return }
+            alert.window.initialFirstResponder = field
             if field.stringValue.trimmingCharacters(in: .whitespaces) == taskTitle {
                 model.stopNow()
                 refreshLabel()
@@ -245,11 +251,14 @@ final class StatusItemController: NSObject {
 
     // MARK: - Keyboard & outside clicks
 
-    /// Esc closes the popover when it is key.
+    /// Esc closes the popover when it is key — unless the popover has an
+    /// attached sheet, which owns Esc (cancel) itself.
     private func installEscMonitor() {
         escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             if event.keyCode == 53, self.popover.isShown {
+                let attachedSheet = self.popover.contentViewController?.view.window?.attachedSheet
+                guard attachedSheet == nil else { return event }
                 self.popover.performClose(nil)
                 return nil
             }

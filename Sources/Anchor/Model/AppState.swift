@@ -177,13 +177,21 @@ final class AppState {
         } else {
             tasks.append(task)
         }
+        if phase == .breakTime {
+            recomputeNextTask()
+        }
         persist()
     }
 
     func deleteTask(id: TaskItem.ID) {
         guard id != activeTaskID else { return }
         tasks.removeAll { $0.id == id }
-        if nextTaskID == id { nextTaskID = nil }
+        if phase == .breakTime {
+            // The deleted task may have been the banner's "next up".
+            recomputeNextTask()
+        } else if nextTaskID == id {
+            nextTaskID = nil
+        }
         persist()
     }
 
@@ -198,9 +206,8 @@ final class AppState {
         tasks[index].setDone(done, on: todayKey)
         if phase == .breakTime {
             // The break banner's "next up" must stay accurate while the break
-            // runs; recompute after any check-off during it. The completed
-            // task is already marked done, so no id exclusion is needed.
-            nextTaskID = tasks.first { !$0.isDone(on: todayKey) }?.id
+            // runs; recompute after any check-off during it.
+            recomputeNextTask()
         }
         persist()
     }
@@ -391,9 +398,10 @@ final class AppState {
            creditSession {
             tasks[index].setDone(true, on: todayKey)
         }
-        // The completed task is now done for today, so the next "up" is simply
-        // the first task that is still not done.
-        nextTaskID = tasks.first { !$0.isDone(on: todayKey) }?.id
+        // "Next up" is always the first task still not done today: after a
+        // credited end that excludes the finished task, and after an early
+        // skip-to-break it points back at the abandoned task itself.
+        recomputeNextTask()
         phase = .breakTime
         breakEndsAt = clock().addingTimeInterval(max(1, settings.breakSeconds))
         clearRun()
@@ -414,6 +422,13 @@ final class AppState {
         if let id, presets.contains(where: { $0.id == id }) {
             lastUsedPresetID = id
         }
+    }
+
+    /// "Next up" is always the first task still not done today. Called on
+    /// session completion and whenever the list or check-offs change during a
+    /// break (the banner must never point at a done or vanished task).
+    private func recomputeNextTask() {
+        nextTaskID = tasks.first { !$0.isDone(on: todayKey) }?.id
     }
 
     /// The preset an Add-task sheet should be pre-filled with.
@@ -466,7 +481,7 @@ final class AppState {
         if FileManager.default.fileExists(atPath: fileURL.path) {
             let stamp = ISO8601DateFormatter().string(from: clock())
             let backup = fileURL.deletingLastPathComponent()
-                .appendingPathComponent("data.json.corrupt-\(stamp)")
+                .appendingPathComponent("data.json.corrupt-\(stamp)-\(UUID().uuidString.prefix(8))")
             do {
                 try FileManager.default.moveItem(at: fileURL, to: backup)
                 NSLog("Anchor: archive at %@ could not be read — moved to %@ and reseeded.", fileURL.path, backup.path)

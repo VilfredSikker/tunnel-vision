@@ -232,12 +232,27 @@ final class AppStateTests: XCTestCase {
 
     func testSkipToBreakDoesNotCredit() {
         let state = makeState()
-        let (a, _) = seedTwoTasks(in: state)
+        let (a, b) = seedTwoTasks(in: state)
         state.startTask(id: a.id)
         state.skipToBreak()
         XCTAssertEqual(state.phase, .breakTime)
         XCTAssertEqual(state.todayCount, 0)
         XCTAssertFalse(state.tasks[0].isDone(on: state.todayKey))
+        // The abandoned task is still not done, so it stays "next up".
+        XCTAssertEqual(state.nextTaskID, a.id)
+    }
+
+    func testDeleteNextUpDuringBreakPicksNextPending() {
+        let state = makeState()
+        let (a, b) = seedTwoTasks(in: state)
+        let c = state.addTask(title: "Third", durationSeconds: 600, presetID: nil, overrides: [])
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(26 * 60)
+        state.tick() // break after a; next = b
+        XCTAssertEqual(state.nextTaskID, b.id)
+
+        state.deleteTask(id: b.id)
+        XCTAssertEqual(state.nextTaskID, c.id, "banner must move to the next pending task")
     }
 
     func testEngineRefusesStartWhileRunning() {
