@@ -134,6 +134,7 @@ enum SelectionBuilder {
                 whole.insert(rule.bundleID)
             case .window:
                 let pattern = rule.pattern.lowercased()
+                guard !pattern.isEmpty else { continue }
                 for app in apps where app.bundleID == rule.bundleID {
                     for window in app.windows where (window.title?.lowercased() ?? "").contains(pattern) {
                         windows.insert(window.id)

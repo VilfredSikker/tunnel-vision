@@ -424,7 +424,9 @@ struct PickerOverlayView: View {
     @discardableResult
     private func savePresetNow() -> UUID? {
         let name = presetName.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return nil }
+        // Updating an existing preset keeps its stored name when the field
+        // was cleared; creating still requires a name.
+        if savedPresetID == nil && name.isEmpty { return nil }
         let id = onSavePreset(model.rules(), model.mode, name, savedPresetID)
         if let id {
             savedPresetID = id

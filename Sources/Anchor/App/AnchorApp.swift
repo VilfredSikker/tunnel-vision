@@ -29,7 +29,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         // One instance only: two enforcers would fight over the victim store.
-        if NSRunningApplication.runningApplications(withBundleIdentifier: "com.anchor.timer").count > 1 {
+        let otherInstances = NSRunningApplication
+            .runningApplications(withBundleIdentifier: "com.anchor.timer")
+            .filter { !$0.isTerminated && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        if !otherInstances.isEmpty {
             Self.log.info("another Anchor instance is running — quitting")
             NSApp.terminate(nil)
             return
