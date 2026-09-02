@@ -255,6 +255,21 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.nextTaskID, c.id, "banner must move to the next pending task")
     }
 
+    func testAddDuringBreakRefreshesNextUp() {
+        let state = makeState()
+        let (a, b) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(26 * 60)
+        state.tick() // break after a; next = b
+        XCTAssertEqual(state.nextTaskID, b.id)
+
+        // b done + a new task added mid-break: the newcomer becomes next up.
+        state.setTaskDone(id: b.id, done: true)
+        XCTAssertNil(state.nextTaskID)
+        let c = state.addTask(title: "Fresh", durationSeconds: 600, presetID: nil, overrides: [])
+        XCTAssertEqual(state.nextTaskID, c.id, "a task added during a break must appear on the banner")
+    }
+
     func testEngineRefusesStartWhileRunning() {
         let state = makeState()
         let (a, b) = seedTwoTasks(in: state)
