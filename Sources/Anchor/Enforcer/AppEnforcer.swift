@@ -336,19 +336,24 @@ final class AppEnforcer: LockListener {
             notifyBlocked(snapshot)
         case .frozen:
             // Freeze = hide + SIGSTOP (FEASIBILITY.md); SIGCONT on unlock.
-            // The hide is persisted even when the stop fails, so a crash
-            // right here still restores the hidden app.
+            // The pid is recorded as frozen optimistically, BEFORE the stop:
+            // a crash between SIGSTOP and the next persist would otherwise
+            // leave an app stopped but recorded hidden-only. A stale frozen
+            // record is harmless — SIGCONT to a running process is a no-op.
             let wasHidden = hiddenPIDs.contains(snapshot.pid)
             process.hide(pid: snapshot.pid)
             hiddenPIDs.insert(snapshot.pid)
+            frozenPIDs.insert(snapshot.pid)
             persistVictims()
             if process.suspend(pid: snapshot.pid) {
-                frozenPIDs.insert(snapshot.pid)
-                persistVictims()
                 Self.log.info("frozen: SIGSTOP \(snapshot.name, privacy: .public) pid=\(snapshot.pid)")
                 if !wasHidden {
                     notifyBlocked(snapshot)
                 }
+            } else {
+                frozenPIDs.remove(snapshot.pid)
+                persistVictims()
+                Self.log.info("frozen: SIGSTOP failed for \(snapshot.name, privacy: .public) — kept hidden only")
             }
         }
     }

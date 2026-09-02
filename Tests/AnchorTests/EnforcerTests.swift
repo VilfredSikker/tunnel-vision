@@ -215,6 +215,23 @@ final class EnforcerTests: XCTestCase {
         XCTAssertFalse(enforcer.isLocking)
     }
 
+    func testFrozenSuspendFailureKeepsHiddenRecord() {
+        let fake = FakeProcessManager()
+        fake.launch(bundleID: slackID, name: "Slack", pid: 102)
+        fake.failSuspend = true
+        let enforcer = AppEnforcer(process: fake, frozenStore: store)
+
+        enforcer.lock(mode: .frozen, rules: [Rule(bundleID: xcodeID)])
+        XCTAssertTrue(fake.hidden.contains(102), "hidden even when the stop fails")
+        XCTAssertFalse(fake.suspended.contains(102))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: thawURL.path), "hide is crash-safe on its own")
+
+        enforcer.unlock()
+        XCTAssertTrue(fake.unhidden.contains(102))
+        XCTAssertFalse(fake.resumed.contains(102), "nothing was stopped, nothing to resume")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: thawURL.path))
+    }
+
     func testCrashRestoreUnhidesDarkModeVictim() throws {
         let fake = FakeProcessManager()
         fake.launch(bundleID: slackID, name: "Slack", pid: 778)
