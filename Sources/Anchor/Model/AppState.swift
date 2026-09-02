@@ -197,7 +197,10 @@ final class AppState {
         }
         tasks[index].setDone(done, on: todayKey)
         if phase == .breakTime {
-            refreshNextTask()
+            // The break banner's "next up" must stay accurate while the break
+            // runs; recompute after any check-off during it. The completed
+            // task is already marked done, so no id exclusion is needed.
+            nextTaskID = tasks.first { !$0.isDone(on: todayKey) }?.id
         }
         persist()
     }
@@ -384,12 +387,13 @@ final class AppState {
         if creditSession {
             todayCount += 1
         }
-        if let id = activeTaskID, let index = tasks.firstIndex(where: { $0.id == id }) {
-            if creditSession {
-                tasks[index].setDone(true, on: todayKey)
-            }
-            nextTaskID = tasks.first(where: { $0.id != id && !$0.isDone(on: todayKey) })?.id
+        if let id = activeTaskID, let index = tasks.firstIndex(where: { $0.id == id }),
+           creditSession {
+            tasks[index].setDone(true, on: todayKey)
         }
+        // The completed task is now done for today, so the next "up" is simply
+        // the first task that is still not done.
+        nextTaskID = tasks.first { !$0.isDone(on: todayKey) }?.id
         phase = .breakTime
         breakEndsAt = clock().addingTimeInterval(max(1, settings.breakSeconds))
         clearRun()
@@ -410,16 +414,6 @@ final class AppState {
         if let id, presets.contains(where: { $0.id == id }) {
             lastUsedPresetID = id
         }
-    }
-
-    /// The break banner's "next up" must stay accurate while the break runs:
-    /// it is recomputed after any check-off during a break.
-    private func refreshNextTask() {
-        guard let id = activeTaskID else {
-            nextTaskID = nil
-            return
-        }
-        nextTaskID = tasks.first { $0.id != id && !$0.isDone(on: todayKey) }?.id
     }
 
     /// The preset an Add-task sheet should be pre-filled with.
@@ -465,14 +459,27 @@ final class AppState {
             countDay = archive.countDay
             normalizeDay()
             ensureBuiltins()
-        } else {
-            presets = BuiltinPresets.all()
-            settings = .default
-            lastUsedPresetID = codingPresetID
-            todayCount = 0
-            countDay = todayKey
-            persist()
+            return
         }
+        // Fresh install, or the archive failed to read/decode. Never silently
+        // overwrite a damaged archive: quarantine it first so nothing is lost.
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            let stamp = ISO8601DateFormatter().string(from: clock())
+            let backup = fileURL.deletingLastPathComponent()
+                .appendingPathComponent("data.json.corrupt-\(stamp)")
+            do {
+                try FileManager.default.moveItem(at: fileURL, to: backup)
+                NSLog("Anchor: archive at %@ could not be read — moved to %@ and reseeded.", fileURL.path, backup.path)
+            } catch {
+                NSLog("Anchor: archive at %@ could not be read and could not be quarantined: %@", fileURL.path, String(describing: error))
+            }
+        }
+        presets = BuiltinPresets.all()
+        settings = .default
+        lastUsedPresetID = codingPresetID
+        todayCount = 0
+        countDay = todayKey
+        persist()
     }
 
     /// Built-ins are re-created if missing (e.g. archive from an older build).

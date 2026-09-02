@@ -10,15 +10,26 @@ final class StatusItemController: NSObject {
     private let popover = NSPopover()
     private var refreshTimer: Timer?
     private var escMonitor: Any?
+    private var outsideMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
 
     init(model: AppState) {
         self.model = model
         super.init()
-        popover.behavior = .transient
+        // Deterministic dismissal: we close on outside clicks, Esc and app
+        // deactivation ourselves. Relying on .transient auto-close re-opens
+        // the popover when the status item itself is clicked (close-then-
+        // toggle race).
+        popover.behavior = .applicationDefined
         popover.animates = true
         let hosting = NSHostingController(rootView: MainPanel(model: model))
         popover.contentViewController = hosting
     }
+
+    // No deinit teardown needed: the controller is an app-lifetime singleton,
+    // the refresh Timer retains it via its selector target while scheduled,
+    // and all event monitors/observers capture self weakly.
+    deinit {}
 
     func install() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -34,6 +45,16 @@ final class StatusItemController: NSObject {
         RunLoop.main.add(timer, forMode: .common)
         refreshTimer = timer
         installEscMonitor()
+        installOutsideClickMonitor()
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.popover.performClose(nil)
+            }
+        }
     }
 
     // MARK: - Menu bar label
@@ -172,9 +193,18 @@ final class StatusItemController: NSObject {
 
     @objc private func quickEndSession() {
         guard let task = model.activeTask else { return }
+        if model.settings.strictMode {
+            confirmEndStrict(taskTitle: task.title)
+        } else {
+            confirmEnd(taskTitle: task.title)
+        }
+    }
+
+    /// Normal mode: one warning dialog.
+    private func confirmEnd(taskTitle: String) {
         let alert = NSAlert()
         alert.messageText = "End the session early?"
-        alert.informativeText = "“\(task.title)” stops now and nothing is counted. Consider a break instead."
+        alert.informativeText = "“\(taskTitle)” stops now and nothing is counted. Consider a break instead."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "End Session")
         alert.addButton(withTitle: "Cancel")
@@ -185,12 +215,35 @@ final class StatusItemController: NSObject {
         }
     }
 
+    /// Strict mode: the quick action must not bypass the type-the-title
+    /// friction that applies to early stops.
+    private func confirmEndStrict(taskTitle: String) {
+        let alert = NSAlert()
+        alert.messageText = "End the session early?"
+        alert.informativeText = "Strict mode is on — type “\(taskTitle)” to confirm."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.placeholderString = "Task title"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "End Session")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        while alert.runModal() == .alertFirstButtonReturn {
+            if field.stringValue.trimmingCharacters(in: .whitespaces) == taskTitle {
+                model.stopNow()
+                refreshLabel()
+                return
+            }
+            NSSound.beep()
+            field.stringValue = ""
+        }
+    }
+
     @objc private func quickQuit() {
         popover.performClose(nil)
         NSApp.terminate(nil)
     }
 
-    // MARK: - Keyboard
+    // MARK: - Keyboard & outside clicks
 
     /// Esc closes the popover when it is key.
     private func installEscMonitor() {
@@ -200,6 +253,28 @@ final class StatusItemController: NSObject {
                 self.popover.performClose(nil)
                 return nil
             }
+            return event
+        }
+    }
+
+    /// With .applicationDefined the popover stays up until we close it: clicks
+    /// outside the popover (but in our own app — other apps deactivate us,
+    /// handled by the resign observer above) dismiss it. Clicks on the status
+    /// item itself and on the popover's attached sheets/children are exempt so
+    /// the toggle and sheet editing keep working.
+    private func installOutsideClickMonitor() {
+        outsideMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self, self.popover.isShown, let clicked = event.window else { return event }
+            guard let popoverWindow = self.popover.contentViewController?.view.window else { return event }
+            if clicked === popoverWindow { return event }
+            if clicked === self.statusItem?.button?.window { return event }
+            if clicked.sheetParent === popoverWindow { return event }
+            var ancestor = clicked.parent
+            while let a = ancestor {
+                if a === popoverWindow { return event }
+                ancestor = a.parent
+            }
+            self.popover.performClose(nil)
             return event
         }
     }

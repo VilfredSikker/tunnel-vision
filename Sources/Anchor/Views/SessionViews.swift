@@ -27,26 +27,30 @@ struct SessionHeader: View {
     }
 
     private var ring: some View {
-        ZStack {
-            Circle()
-                .stroke(Color.primary.opacity(0.08), lineWidth: 7)
-            Circle()
-                .trim(from: 0, to: fraction)
-                .stroke(ringColor, style: StrokeStyle(lineWidth: 7, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            VStack(spacing: 2) {
-                Text(TimeFormat.clock(model.remainingSeconds ?? 0))
-                    .font(.system(size: 34, weight: .semibold))
-                    .monospacedDigit()
-                Text(model.phase == .paused ? "paused" : "focus")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(1)
+        // Clock-derived values don't mutate @Observable storage, so a plain
+        // body would freeze while the popover stays open. Periodic re-eval
+        // keeps the countdown and progress ring live.
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            ZStack {
+                Circle()
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 7)
+                Circle()
+                    .trim(from: 0, to: fraction)
+                    .stroke(ringColor, style: StrokeStyle(lineWidth: 7, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                VStack(spacing: 2) {
+                    Text(TimeFormat.clock(model.remainingSeconds ?? 0))
+                        .font(.system(size: 34, weight: .semibold))
+                        .monospacedDigit()
+                    Text(model.phase == .paused ? "paused" : "focus")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                        .tracking(1)
+                }
             }
+            .frame(width: 132, height: 132)
         }
-        .frame(width: 132, height: 132)
-        .animation(.linear(duration: 0.5), value: fraction)
     }
 
     private var ringColor: Color {
@@ -134,9 +138,11 @@ struct BreakHeader: View {
                 .foregroundStyle(.secondary)
                 .textCase(.uppercase)
                 .tracking(1)
-            Text(TimeFormat.clock(model.remainingSeconds ?? 0))
-                .font(.system(size: 40, weight: .semibold))
-                .monospacedDigit()
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                Text(TimeFormat.clock(model.remainingSeconds ?? 0))
+                    .font(.system(size: 40, weight: .semibold))
+                    .monospacedDigit()
+            }
             if let next = model.nextTask {
                 Text("Next up: \(next.title)")
                     .font(.callout)
@@ -171,7 +177,10 @@ struct BreakHeader: View {
 }
 
 /// Stop with friction: hold two seconds (design constraint, early stop).
-/// In strict mode a single click redirects to the type-the-title sheet instead.
+/// Keyboard follow-up: Space fires the (empty) Button action and the
+/// DragGesture only tracks the pointer, so a keyboard stop path still needs
+/// a click-safe design — noted as a follow-up.
+/// In strict mode a single click redirects to the type-the-title sheet.
 private struct HoldStopButton: View {
     let strict: Bool
     let action: () -> Void

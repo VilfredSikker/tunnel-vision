@@ -9,6 +9,7 @@ struct MainPanel: View {
     @State private var editorMode: EditorMode?
     @State private var showPresets = false
     @State private var showStrictStop = false
+    @State private var strictStopTitle = ""
     @State private var dragID: TaskItem.ID?
 
     enum EditorMode: Identifiable {
@@ -33,7 +34,12 @@ struct MainPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             if model.phase == .work || model.phase == .paused {
-                SessionHeader(model: model, onStrictStop: { showStrictStop = true })
+                SessionHeader(model: model, onStrictStop: {
+                    // Capture the title now: the session may end while the
+                    // sheet is open and model.activeTask would go nil.
+                    strictStopTitle = model.activeTask?.title ?? ""
+                    showStrictStop = !strictStopTitle.isEmpty
+                })
             } else if model.phase == .breakTime {
                 BreakHeader(model: model)
             }
@@ -56,11 +62,18 @@ struct MainPanel: View {
             PresetsManagerView(model: model)
         }
         .sheet(isPresented: $showStrictStop) {
-            if let title = model.activeTask?.title {
-                StrictStopView(taskTitle: title) {
+            if !strictStopTitle.isEmpty {
+                StrictStopView(taskTitle: strictStopTitle) {
                     model.stopNow()
                     showStrictStop = false
                 }
+            }
+        }
+        .onChange(of: model.phase) { _, phase in
+            // The session ended while the typed-title sheet was open: the
+            // stop is moot, close the sheet.
+            if showStrictStop, phase != .work, phase != .paused {
+                showStrictStop = false
             }
         }
     }

@@ -293,6 +293,36 @@ final class AppStateTests: XCTestCase {
         XCTAssertNil(state.nextTaskID, "break banner must not offer a done task")
     }
 
+    func testCheckoffDuringBreakKeepsOtherPendingNextTask() {
+        let state = makeState()
+        let (a, b) = seedTwoTasks(in: state)
+        let c = state.addTask(title: "Third", durationSeconds: 600, presetID: nil, overrides: [])
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(26 * 60)
+        state.tick() // break after a; first not-done is b
+        XCTAssertEqual(state.nextTaskID, b.id)
+
+        // Checking off the *third* task mid-break must not clear the banner:
+        // b is still pending.
+        state.setTaskDone(id: c.id, done: true)
+        XCTAssertEqual(state.nextTaskID, b.id, "b is still pending and must stay on the banner")
+        state.setTaskDone(id: b.id, done: true)
+        XCTAssertNil(state.nextTaskID)
+    }
+
+    func testCorruptArchiveIsQuarantinedNotOverwritten() throws {
+        let dir = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("this is not a json archive".utf8).write(to: url)
+
+        let state = makeState() // loadOrSeed must quarantine, then reseed
+        XCTAssertEqual(state.presets.map(\.name), ["Coding", "Writing", "Comms", "Reading"])
+
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        let backups = siblings.filter { $0.hasPrefix("data.json.corrupt-") }
+        XCTAssertEqual(backups.count, 1, "the damaged archive must be moved aside, not overwritten")
+    }
+
     func testEngineRefusesStartingDoneTask() {
         let state = makeState()
         let (a, _) = seedTwoTasks(in: state)
