@@ -51,8 +51,8 @@ final class PickerOverlayPresenter {
             model: overlayModel,
             screenRecordingAllowed: screenRecordingAllowed,
             onRequestScreenRecording: { ScreenCapturePermission.request() },
-            onSavePreset: { [weak self] rules, presetMode, name in
-                self?.createPreset(rules: rules, mode: presetMode, name: name)
+            onSavePreset: { [weak self] rules, presetMode, name, existingID in
+                self?.upsertPreset(rules: rules, mode: presetMode, name: name, existingID: existingID)
             },
             onCancel: { [weak self] in self?.finish(with: nil) },
             onDone: { [weak self] rules, chosenMode, savedID in
@@ -111,8 +111,19 @@ final class PickerOverlayPresenter {
         }
     }
 
-    private func createPreset(rules: [Rule], mode: Mode, name: String) -> UUID? {
+    /// Saves the current selection into the preset — creating it when needed,
+    /// updating the already-saved one otherwise so later toggles are kept.
+    private func upsertPreset(rules: [Rule], mode: Mode, name: String, existingID: UUID?) -> UUID? {
         guard let model else { return nil }
+        if let existingID,
+           let index = model.presets.firstIndex(where: { $0.id == existingID }) {
+            var preset = model.presets[index]
+            preset.name = preset.name.trimmingCharacters(in: .whitespaces).isEmpty ? name : preset.name
+            preset.rules = rules
+            preset.mode = mode
+            model.updatePreset(preset)
+            return existingID
+        }
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
         let preset = model.addPreset(name: uniqueName(trimmed, in: model), mode: mode)

@@ -297,10 +297,15 @@ final class AppState {
               !presets[index].isBuiltIn else { return false }
         presets.remove(at: index)
         if lastUsedPresetID == id { lastUsedPresetID = nil }
+        let touchedActiveTask = (phase == .work || phase == .paused) && activeTask?.presetID == id
         for taskIndex in tasks.indices where tasks[taskIndex].presetID == id {
             tasks[taskIndex].presetID = nil
         }
         persist()
+        if touchedActiveTask {
+            // The running session lost its preset → custom allowlist now.
+            notifyLockChange()
+        }
         return true
     }
 
@@ -311,6 +316,10 @@ final class AppState {
         updated.rules = preset.rules.filter(\.isComplete)
         presets[index] = updated
         persist()
+        // The running session's allowlist may have changed (rules or mode).
+        if (phase == .work || phase == .paused), activeTask?.presetID == preset.id {
+            notifyLockChange()
+        }
     }
 
     // MARK: - Settings

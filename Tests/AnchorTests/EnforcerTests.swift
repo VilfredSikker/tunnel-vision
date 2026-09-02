@@ -210,6 +210,22 @@ final class EnforcerTests: XCTestCase {
 
         let enforcer = AppEnforcer(process: fake, frozenStore: store)
         XCTAssertTrue(fake.resumed.contains(777), "Anchor died frozen: next launch SIGCONTs survivors")
+        XCTAssertTrue(fake.unhidden.contains(777), "frozen victims were hidden too and come back")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: thawURL.path))
+        XCTAssertFalse(enforcer.isLocking)
+    }
+
+    func testCrashRestoreUnhidesDarkModeVictim() throws {
+        let fake = FakeProcessManager()
+        fake.launch(bundleID: slackID, name: "Slack", pid: 778)
+        let dir = thawURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let victim = FrozenPidStore.Victim(pid: 778, hidden: true, frozen: false)
+        try JSONEncoder().encode([victim]).write(to: thawURL)
+
+        let enforcer = AppEnforcer(process: fake, frozenStore: store)
+        XCTAssertTrue(fake.unhidden.contains(778), "hidden-only victims are restored after a crash")
+        XCTAssertFalse(fake.resumed.contains(778))
         XCTAssertFalse(FileManager.default.fileExists(atPath: thawURL.path))
         XCTAssertFalse(enforcer.isLocking)
     }

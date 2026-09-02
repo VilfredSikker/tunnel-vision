@@ -56,7 +56,7 @@ struct TaskRowView: View {
         if let presetID = task.presetID, let preset = model.presets.first(where: { $0.id == presetID }) {
             parts.append(preset.name)
         } else if task.overrides.isEmpty {
-            parts.append("No lock")
+            parts.append("Locks everything else")
         } else {
             parts.append("Custom")
         }
@@ -80,10 +80,11 @@ struct TaskRowView: View {
     private var iconStrip: some View {
         let ids = ruleBundleIDs
         if ids.isEmpty {
-            Image(systemName: "lock.open")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+            Image(systemName: "lock")
+                .font(.system(size: 10))
+                .foregroundStyle(Color.secondary.opacity(0.6))
                 .frame(width: 14)
+                .help("Empty allowlist — other apps get locked")
         } else {
             HStack(spacing: -2) {
                 ForEach(ids.prefix(3), id: \.self) { bundleID in

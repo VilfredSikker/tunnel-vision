@@ -4,6 +4,22 @@ import XCTest
 @testable import Anchor
 
 /// Deterministic tests: a mutable fake clock, no tick loop, sounds off.
+/// Records lock-state calls for transition tests.
+@MainActor
+final class RecordingLockListener: LockListener {
+    struct Call: Equatable {
+        let active: Bool
+        let rules: [Rule]
+        let mode: Mode
+    }
+
+    var calls: [Call] = []
+
+    func lockStateChanged(active: Bool, rules: [Rule], mode: Mode) {
+        calls.append(Call(active: active, rules: rules, mode: mode))
+    }
+}
+
 @MainActor
 final class AppStateTests: XCTestCase {
     /// Reference date so tests stay independent of the real clock.
@@ -369,5 +385,98 @@ final class AppStateTests: XCTestCase {
         let comms = state.preset(named: "Comms")!
         state.addTask(title: "T", durationSeconds: 1500, presetID: comms.id, overrides: [])
         XCTAssertEqual(state.defaultPresetID, comms.id)
+    }
+
+    // MARK: Lock notifications
+
+    func testLockListenerTracksSessionTransitions() {
+        let state = makeState()
+        let listener = RecordingLockListener()
+        state.lockListener = listener
+        let (a, _) = seedTwoTasks(in: state)
+
+        XCTAssertTrue(listener.calls.isEmpty)
+        state.startTask(id: a.id)
+        XCTAssertEqual(listener.calls.map(\.active), [true])
+        let lockCall = listener.calls.last!
+        XCTAssertEqual(lockCall.mode, .dark)
+        XCTAssertTrue(lockCall.rules.contains { $0.bundleID == "com.apple.dt.Xcode" })
+
+        // Pause/resume keep the lock — no new notifications.
+        state.pause()
+        state.resume()
+        XCTAssertEqual(listener.calls.count, 1)
+
+        state.stopNow()
+        XCTAssertEqual(listener.calls.last?.active, false, "early stop unlocks")
+
+        state.startTask(id: a.id)
+        state.finishTaskDone()
+        XCTAssertEqual(listener.calls.last?.active, false, "done → break unlocks")
+    }
+
+    func testPresetEditAndDeleteRelockActiveSession() {
+        let state = makeState()
+        let listener = RecordingLockListener()
+        state.lockListener = listener
+        let (a, _) = seedTwoTasks(in: state) // a uses Coding
+        state.startTask(id: a.id)
+        XCTAssertEqual(listener.calls.count, 1)
+
+        // Editing the running preset's rules must reach the enforcer.
+        let coding = state.preset(named: "Coding")!
+        var edited = coding
+        edited.rules.append(Rule(bundleID: "com.example.newapp"))
+        state.updatePreset(edited)
+        XCTAssertEqual(listener.calls.count, 2)
+        XCTAssertTrue(listener.calls.last!.rules.contains { $0.bundleID == "com.example.newapp" })
+
+        // Deleting a preset the running task does not use → no notification.
+        let dup = state.duplicatePreset(id: coding.id)!
+        state.deletePreset(id: dup.id)
+        XCTAssertEqual(listener.calls.count, 2)
+
+        // Point the running task at a custom preset copy, then delete it:
+        // the enforcer must fall back to the (now empty) custom rules.
+        let dup2 = state.duplicatePreset(id: coding.id)!
+        state.setTaskPreset(id: a.id, presetID: dup2.id)
+        XCTAssertEqual(listener.calls.count, 3)
+        XCTAssertTrue(listener.calls.last!.rules.contains { $0.bundleID == "com.apple.dt.Xcode" })
+
+        state.deletePreset(id: dup2.id)
+        XCTAssertEqual(listener.calls.count, 4)
+        XCTAssertTrue(listener.calls.last!.active)
+        XCTAssertTrue(listener.calls.last!.rules.isEmpty,
+                       "preset gone → the task's own (empty) allowlist applies")
+
+        // Built-ins still cannot be deleted and never notify.
+        state.deletePreset(id: coding.id)
+        XCTAssertEqual(listener.calls.count, 4)
+    }
+
+    func testAllowInActiveTaskAppendsToPresetOrOverrides() {
+        let state = makeState()
+        let listener = RecordingLockListener()
+        state.lockListener = listener
+
+        let (a, b) = seedTwoTasks(in: state)
+        state.startTask(id: a.id) // preset-based
+        state.allowInActiveTask(bundleID: "com.example.slack")
+        XCTAssertTrue(state.preset(named: "Coding")!.rules.contains { $0.bundleID == "com.example.slack" })
+        XCTAssertEqual(listener.calls.last?.active, true)
+
+        state.stopNow()
+        state.startTask(id: b.id) // custom task
+        state.allowInActiveTask(bundleID: "com.example.slack")
+        let task = state.tasks.first { $0.id == b.id }!
+        XCTAssertTrue(task.overrides.contains { $0.bundleID == "com.example.slack" })
+        XCTAssertTrue(listener.calls.last!.rules.contains { $0.bundleID == "com.example.slack" })
+    }
+
+    func testLockListenerUnsetIsNoop() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        XCTAssertTrue(state.tasks.count == 2)
     }
 }

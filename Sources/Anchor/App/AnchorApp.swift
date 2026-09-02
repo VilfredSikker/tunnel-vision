@@ -1,4 +1,5 @@
 import AppKit
+import os
 import SwiftUI
 
 @main
@@ -15,6 +16,8 @@ struct AnchorApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let log = Logger(subsystem: "com.anchor.timer", category: "app")
+
     let model = AppState()
     private var statusItemController: StatusItemController?
     private var enforcer: AppEnforcer?
@@ -24,6 +27,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The .app bundle already sets LSUIElement; this also keeps `swift run`
         // development launches free of a Dock icon.
         NSApp.setActivationPolicy(.accessory)
+
+        // One instance only: two enforcers would fight over the victim store.
+        if NSRunningApplication.runningApplications(withBundleIdentifier: "com.anchor.timer").count > 1 {
+            Self.log.info("another Anchor instance is running — quitting")
+            NSApp.terminate(nil)
+            return
+        }
 
         let status = StatusItemController(model: model)
         status.install()

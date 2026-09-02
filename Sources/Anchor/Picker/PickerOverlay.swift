@@ -70,8 +70,11 @@ final class PickerOverlayModel {
     }
 
     /// Click on a window tile: if the whole app was included, narrow down to
-    /// just this window; otherwise toggle the window.
+    /// just this window; otherwise toggle the window. Narrowing to a window
+    /// without a title is refused — such a pick could never become a rule and
+    /// would silently un-allow the app.
     func toggleWindow(_ window: PickerWindowInfo, in app: PickerAppInfo) {
+        guard window.title != nil else { return }
         if wholeAppBundles.contains(app.bundleID) {
             wholeAppBundles.remove(app.bundleID)
         }
@@ -119,8 +122,9 @@ struct PickerOverlayView: View {
     @Bindable var model: PickerOverlayModel
     let screenRecordingAllowed: Bool
     let onRequestScreenRecording: () -> Void
-    /// Creates the preset (rules + mode) and returns its id, or nil.
-    let onSavePreset: (_ rules: [Rule], _ mode: Mode, _ name: String) -> UUID?
+    /// Creates or updates the named preset (rules + mode) and returns its id,
+    /// or nil when the name is empty.
+    let onSavePreset: (_ rules: [Rule], _ mode: Mode, _ name: String, _ existingID: UUID?) -> UUID?
     let onCancel: () -> Void
     let onDone: (_ rules: [Rule], _ mode: Mode, _ savedPresetID: UUID?) -> Void
 
@@ -188,7 +192,7 @@ struct PickerOverlayView: View {
                         .font(.caption)
                 }
                 .controlSize(.small)
-                .help("Window titles need the Screen Recording permission. Whole-app picks work without it.")
+                .help("Window titles need the Screen Recording permission. Whole-app picks work without it — reopen the picker after granting to see per-window titles.")
             }
         }
         .padding(.horizontal, 20)
@@ -335,8 +339,10 @@ struct PickerOverlayView: View {
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
                 Button {
-                    let id = savedPresetID ?? (showPresetField ? savePresetNow() : nil)
-                    onDone(model.rules(), model.mode, id)
+                    // A previously saved preset is updated with the final
+                    // selection so later toggles are never lost.
+                    let saved = showPresetField ? savePresetNow() : savedPresetID
+                    onDone(model.rules(), model.mode, saved)
                 } label: {
                     Text("Done")
                 }
@@ -419,8 +425,8 @@ struct PickerOverlayView: View {
     private func savePresetNow() -> UUID? {
         let name = presetName.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return nil }
-        let id = onSavePreset(model.rules(), model.mode, name)
-        if id != nil {
+        let id = onSavePreset(model.rules(), model.mode, name, savedPresetID)
+        if let id {
             savedPresetID = id
         }
         return id

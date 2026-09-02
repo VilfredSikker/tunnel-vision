@@ -135,12 +135,18 @@ final class WorkspaceProcessManager: ProcessManaging {
     }
 }
 
-// MARK: - Crash-safe frozen-app store
+// MARK: - Crash-safe victim store
 
-/// Frozen apps are SIGSTOPped; if Anchor dies they would stay frozen. Every
-/// stop is recorded here and thawed on the next launch.
+/// Apps we stopped or hid are recorded here; if Anchor dies they would stay
+/// frozen/hidden forever, so the next launch restores them.
 @MainActor
 final class FrozenPidStore {
+    struct Victim: Codable, Equatable {
+        var pid: Int
+        var hidden: Bool
+        var frozen: Bool
+    }
+
     private let url: URL
 
     init(url: URL? = nil) {
@@ -150,13 +156,13 @@ final class FrozenPidStore {
         self.url = url ?? fallback
     }
 
-    func record(pids: Set<pid_t>) {
+    func record(victims: [Victim]) {
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(Array(pids))
+            let data = try JSONEncoder().encode(victims)
             try data.write(to: url, options: .atomic)
         } catch {
-            NSLog("Anchor: could not persist frozen pids: \(error)")
+            NSLog("Anchor: could not persist victims: \(error)")
         }
     }
 
@@ -164,10 +170,16 @@ final class FrozenPidStore {
         try? FileManager.default.removeItem(at: url)
     }
 
-    func read() -> [pid_t] {
-        guard let data = try? Data(contentsOf: url),
-              let pids = try? JSONDecoder().decode([pid_t].self, from: data) else { return [] }
-        return pids
+    func read() -> [Victim] {
+        // Tolerate the v1 schema ([pid]) and the v2 schema ([victim]) both.
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        if let victims = try? JSONDecoder().decode([Victim].self, from: data) {
+            return victims
+        }
+        if let legacy = try? JSONDecoder().decode([Int].self, from: data) {
+            return legacy.map { Victim(pid: $0, hidden: true, frozen: true) }
+        }
+        return []
     }
 }
 
@@ -244,6 +256,7 @@ final class AppEnforcer: LockListener {
         stopWatching()
         thawFrozen()
         unhideHidden()
+        persistVictims() // empty → store cleared
     }
 
     /// "Allow for this session": re-admits an app that was blocked, thawing
@@ -266,13 +279,10 @@ final class AppEnforcer: LockListener {
             process.unhide(pid: pid)
             hiddenPIDs.remove(pid)
         }
+        persistVictims()
         if !thawable.isEmpty || !unhideable.isEmpty {
             Self.log.info("recovered \(thawable.count + unhideable.count) process(es) for \(bundleID, privacy: .public)")
         }
-    }
-
-    func resetSessionOverrides() {
-        sessionOverrideBundles = []
     }
 
     private func enforceRunningApplications() {
@@ -295,6 +305,7 @@ final class AppEnforcer: LockListener {
             }
             hiddenPIDs.remove(pid)
         }
+        persistVictims()
     }
 
     /// Enforce one snapshot (internal so tests can drive app events).
@@ -313,6 +324,7 @@ final class AppEnforcer: LockListener {
         case .dark:
             process.hide(pid: snapshot.pid)
             hiddenPIDs.insert(snapshot.pid)
+            persistVictims()
             Self.log.info("dark: hid \(snapshot.name, privacy: .public)")
             notifyBlocked(snapshot)
         case .closed:
@@ -325,7 +337,7 @@ final class AppEnforcer: LockListener {
             hiddenPIDs.insert(snapshot.pid)
             if process.suspend(pid: snapshot.pid) {
                 frozenPIDs.insert(snapshot.pid)
-                frozenStore.record(pids: frozenPIDs)
+                persistVictims()
                 Self.log.info("frozen: SIGSTOP \(snapshot.name, privacy: .public) pid=\(snapshot.pid)")
                 notifyBlocked(snapshot)
             }
@@ -338,12 +350,36 @@ final class AppEnforcer: LockListener {
         guard isLocking, !app.isTerminated else { return }
         let pid = app.processIdentifier
         guard pid > 0, pid != selfPID else { return }
+        guard let bundleID = app.bundleIdentifier else {
+            // A bundle id can be missing for a heartbeat (e.g. the moment of
+            // launch). Re-check shortly after; the process is unenforceable
+            // without a bundle anyway.
+            scheduleLaunchRecheck(pid: pid, name: app.localizedName ?? "process \(pid)")
+            return
+        }
         enforce(snapshot: ProcessSnapshot(
             pid: pid,
             name: app.localizedName ?? "process \(pid)",
-            bundleID: app.bundleIdentifier,
+            bundleID: bundleID,
             isSelf: false
         ))
+    }
+
+    /// The app may not have had its bundle id yet at launch time; re-check
+    /// once after a short delay so freshly launched apps are still caught.
+    private func scheduleLaunchRecheck(pid: pid_t, name: String) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard let self, self.isLocking else { return }
+            guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+            guard let bundleID = app.bundleIdentifier else { return }
+            self.enforce(snapshot: ProcessSnapshot(
+                pid: pid,
+                name: name,
+                bundleID: bundleID,
+                isSelf: false
+            ))
+        }
     }
 
     private func notifyBlocked(_ snapshot: ProcessSnapshot) {
@@ -360,7 +396,6 @@ final class AppEnforcer: LockListener {
         for pid in frozenPIDs {
             resumeAndForget(pid: pid)
         }
-        frozenStore.clear()
     }
 
     private func resumeAndForget(pid: pid_t) {
@@ -368,7 +403,7 @@ final class AppEnforcer: LockListener {
             process.resume(pid: pid)
         }
         frozenPIDs.remove(pid)
-        frozenStore.record(pids: frozenPIDs)
+        persistVictims()
     }
 
     private func unhideHidden() {
@@ -376,6 +411,19 @@ final class AppEnforcer: LockListener {
             process.unhide(pid: pid)
         }
         hiddenPIDs = []
+    }
+
+    /// What survives a crash: every app we hid or froze, with its fate.
+    private func persistVictims() {
+        var victims: [FrozenPidStore.Victim] = []
+        for pid in hiddenPIDs {
+            victims.append(FrozenPidStore.Victim(pid: Int(pid), hidden: true, frozen: frozenPIDs.contains(pid)))
+        }
+        if victims.isEmpty {
+            frozenStore.clear()
+        } else {
+            frozenStore.record(victims: victims)
+        }
     }
 
     // MARK: Watchdogs
@@ -414,14 +462,24 @@ final class AppEnforcer: LockListener {
 
     // MARK: Crash safety
 
-    /// Anchor died while apps were frozen: thaw everything still alive.
+    /// Anchor died while apps were frozen or hidden: restore everything that
+    /// is still alive on the next launch.
     private func thawOnLaunch() {
-        let pids = frozenStore.read()
-        guard !pids.isEmpty else { return }
-        Self.log.info("thawing \(pids.count) frozen process(es) from previous run")
-        for pid in pids {
-            if process.isRunning(pid: pid) {
+        let victims = frozenStore.read()
+        guard !victims.isEmpty else { return }
+        let alive = victims.filter { process.isRunning(pid: pid_t($0.pid)) }
+        guard !alive.isEmpty else {
+            frozenStore.clear()
+            return
+        }
+        Self.log.info("restoring \(alive.count) victim(s) from previous run")
+        for victim in alive {
+            let pid = pid_t(victim.pid)
+            if victim.frozen {
                 process.resume(pid: pid)
+            }
+            if victim.hidden {
+                process.unhide(pid: pid)
             }
         }
         frozenStore.clear()
