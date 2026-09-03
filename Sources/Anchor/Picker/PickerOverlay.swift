@@ -204,7 +204,7 @@ struct PickerOverlayView: View {
             Image(systemName: "app.dashed")
                 .font(.system(size: 28))
                 .foregroundStyle(.tertiary)
-            Text("No other windows are open right now.")
+            Text("No other apps are running right now.")
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, minHeight: 300)

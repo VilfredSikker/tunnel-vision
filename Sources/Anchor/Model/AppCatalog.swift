@@ -15,10 +15,14 @@ enum AppCatalog {
         var id: String { bundleID }
     }
 
-    /// Running applications with a bundle identifier, sorted by name.
+    /// Running regular (Cmd-Tab) apps with a bundle identifier, sorted by
+    /// name. Background agents and menu-bar helpers are not offered: they
+    /// are never enforced, so a rule for them would be inert.
     static var runningApps: [RunningApp] {
-        NSWorkspace.shared.runningApplications
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        return NSWorkspace.shared.runningApplications
             .compactMap { app -> RunningApp? in
+                guard app.activationPolicy == .regular, app.processIdentifier != selfPID else { return nil }
                 guard let bundleID = app.bundleIdentifier else { return nil }
                 return RunningApp(
                     name: app.localizedName ?? bundleID,

@@ -73,7 +73,13 @@ final class PickerOverlayPresenter {
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         let hosting = NSHostingController(rootView: view)
+        // By default the controller publishes the SwiftUI ideal size as its
+        // preferredContentSize, and assigning it shrinks the panel to that.
+        // The app list is a scroll view with no ideal height, so the picker
+        // collapsed to its top and bottom bars. The panel is the whole screen.
+        hosting.sizingOptions = []
         panel.contentViewController = hosting
+        panel.setFrame(screen.frame, display: true)
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.panel = panel

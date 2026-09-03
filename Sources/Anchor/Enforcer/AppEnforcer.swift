@@ -11,7 +11,20 @@ enum Enforcement: Equatable, Sendable {
     case closed
     case frozen
 
-    static func decide(mode: Mode, bundleID: String?, allowed: Set<String>, exempt: Set<String>) -> Enforcement {
+    static func decide(
+        mode: Mode,
+        bundleID: String?,
+        isRegularApp: Bool,
+        allowed: Set<String>,
+        exempt: Set<String>
+    ) -> Enforcement {
+        guard isRegularApp else {
+            // Only apps that show in Cmd-Tab and Mission Control are policed.
+            // Background agents, menu-bar helpers and system UI never appear
+            // in the picker, so they could never be allowed; freezing or
+            // quitting them would only break the system.
+            return .none
+        }
         guard let bundleID, !bundleID.isEmpty else {
             // No bundle id: cannot be matched by a rule, cannot be usefully
             // exempted (helper daemons, unbundled tools).
@@ -66,6 +79,8 @@ struct ProcessSnapshot: Equatable, Sendable {
     let name: String
     let bundleID: String?
     let isSelf: Bool
+    /// Dock-visible app (activation policy `.regular`): what Cmd-Tab lists.
+    let isRegularApp: Bool
 }
 
 /// Hides the AppKit/process details so enforcement decisions are testable.
@@ -93,7 +108,8 @@ final class WorkspaceProcessManager: ProcessManaging {
                 pid: pid,
                 name: app.localizedName ?? app.bundleIdentifier ?? "process \(pid)",
                 bundleID: app.bundleIdentifier,
-                isSelf: pid == selfPID
+                isSelf: pid == selfPID,
+                isRegularApp: app.activationPolicy == .regular
             )
         }
     }
@@ -315,6 +331,7 @@ final class AppEnforcer: LockListener {
         let decision = Enforcement.decide(
             mode: mode,
             bundleID: snapshot.bundleID,
+            isRegularApp: snapshot.isRegularApp,
             allowed: allowed,
             exempt: LockPolicy.exemptSystemBundles
         )
@@ -375,7 +392,8 @@ final class AppEnforcer: LockListener {
             pid: pid,
             name: app.localizedName ?? "process \(pid)",
             bundleID: bundleID,
-            isSelf: false
+            isSelf: false,
+            isRegularApp: app.activationPolicy == .regular
         ))
     }
 
@@ -391,7 +409,8 @@ final class AppEnforcer: LockListener {
                 pid: pid,
                 name: name,
                 bundleID: bundleID,
-                isSelf: false
+                isSelf: false,
+                isRegularApp: app.activationPolicy == .regular
             ))
         }
     }

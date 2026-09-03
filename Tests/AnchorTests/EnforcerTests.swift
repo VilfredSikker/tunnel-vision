@@ -50,8 +50,8 @@ final class FakeProcessManager: ProcessManaging {
         apps.contains { $0.pid == pid } && !terminated.contains(pid)
     }
 
-    func launch(bundleID: String, name: String = "App", pid: pid_t = 9001) {
-        apps.append(ProcessSnapshot(pid: pid, name: name, bundleID: bundleID, isSelf: false))
+    func launch(bundleID: String, name: String = "App", pid: pid_t = 9001, regular: Bool = true) {
+        apps.append(ProcessSnapshot(pid: pid, name: name, bundleID: bundleID, isSelf: false, isRegularApp: regular))
     }
 }
 
@@ -92,12 +92,29 @@ final class EnforcerTests: XCTestCase {
 
     func testEnforcementDecision() {
         let allowed: Set<String> = [xcodeID]
-        XCTAssertEqual(Enforcement.decide(mode: .dark, bundleID: nil, allowed: allowed, exempt: []), .none, "unbundled processes are untargetable")
-        XCTAssertEqual(Enforcement.decide(mode: .dark, bundleID: xcodeID, allowed: allowed, exempt: []), .none)
-        XCTAssertEqual(Enforcement.decide(mode: .dark, bundleID: "com.apple.finder", allowed: [], exempt: LockPolicy.exemptSystemBundles), .none)
-        XCTAssertEqual(Enforcement.decide(mode: .dark, bundleID: slackID, allowed: allowed, exempt: []), .dark)
-        XCTAssertEqual(Enforcement.decide(mode: .closed, bundleID: slackID, allowed: allowed, exempt: []), .closed)
-        XCTAssertEqual(Enforcement.decide(mode: .frozen, bundleID: slackID, allowed: allowed, exempt: []), .frozen)
+        func decide(_ mode: Mode, _ bundleID: String?, regular: Bool = true, exempt: Set<String> = []) -> Enforcement {
+            Enforcement.decide(mode: mode, bundleID: bundleID, isRegularApp: regular, allowed: allowed, exempt: exempt)
+        }
+        XCTAssertEqual(decide(.dark, nil), .none, "unbundled processes are untargetable")
+        XCTAssertEqual(decide(.dark, xcodeID), .none)
+        XCTAssertEqual(decide(.dark, "com.apple.finder", exempt: LockPolicy.exemptSystemBundles), .none)
+        XCTAssertEqual(decide(.dark, slackID), .dark)
+        XCTAssertEqual(decide(.closed, slackID), .closed)
+        XCTAssertEqual(decide(.frozen, slackID), .frozen)
+        XCTAssertEqual(decide(.frozen, slackID, regular: false), .none, "only Cmd-Tab apps are policed")
+        XCTAssertEqual(decide(.closed, "com.example.menubar-helper", regular: false), .none)
+    }
+
+    func testBackgroundAppsAreNeverEnforced() {
+        let fake = FakeProcessManager()
+        fake.launch(bundleID: slackID, name: "Slack", pid: 102)
+        fake.launch(bundleID: "com.example.helper", name: "Helper Agent", pid: 104, regular: false)
+        let enforcer = AppEnforcer(process: fake, frozenStore: store)
+
+        enforcer.lock(mode: .frozen, rules: [Rule(bundleID: xcodeID)])
+        XCTAssertTrue(fake.suspended.contains(102), "regular apps off the allowlist are frozen")
+        XCTAssertFalse(fake.hidden.contains(104), "a menu-bar helper cannot appear in the picker, so it is never punished")
+        XCTAssertFalse(fake.suspended.contains(104))
     }
 
     // MARK: Modes
