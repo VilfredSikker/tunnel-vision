@@ -76,6 +76,24 @@ final class WindowCatalogueTests: XCTestCase {
         XCTAssertEqual(slackWindows.map(\.title), ["Alpha channel", "Zebra channel", nil, nil], "titles trimmed, blank titles become nil")
     }
 
+    func testAccessibilityTitlesFillInWhatTheWindowListLacks() {
+        let windows = [
+            window(1, owner: 10, title: nil),
+            window(2, owner: 10, title: "   "),
+            window(3, owner: 10, title: "Listed title"),
+        ]
+        let listed = WindowCatalogue.assemble(
+            apps: [app(10, slack, "Slack")],
+            windows: windows,
+            extraTitles: [1: "Engineering", 2: "Design", 3: "AX title"],
+            selfPID: selfPID
+        )
+        let titles = Dictionary(uniqueKeysWithValues: (listed.first?.windows ?? []).map { ($0.id, $0.title) })
+        XCTAssertEqual(titles[1], "Engineering", "no Screen Recording: the AX title is used")
+        XCTAssertEqual(titles[2], "Design", "a blank listed title counts as missing")
+        XCTAssertEqual(titles[3], "Listed title", "a real listed title wins")
+    }
+
     func testWindowWithoutReportedBoundsIsKept() {
         let record = WindowRecord(id: 1, ownerPID: 10, layer: 0, bounds: nil, title: "Untracked")
         let listed = WindowCatalogue.assemble(apps: [app(10, slack, "Slack")], windows: [record], selfPID: selfPID)

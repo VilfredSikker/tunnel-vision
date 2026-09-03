@@ -18,12 +18,22 @@ struct PresetsManagerView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            listPane
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                listPane
+                Divider()
+                detailPane
+            }
             Divider()
-            detailPane
+            HStack {
+                Spacer()
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
         }
-        .frame(width: 640, height: 460)
+        .frame(width: 640, height: 500)
         .onChange(of: selectedID) { _, newValue in
             guard let newValue, let preset = model.presets.first(where: { $0.id == newValue }) else {
                 draft = nil

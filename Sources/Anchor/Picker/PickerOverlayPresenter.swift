@@ -46,11 +46,11 @@ final class PickerOverlayPresenter {
             mode: mode,
             allowsPresetSave: allowPresetSave
         )
-        let screenRecordingAllowed = ScreenCapturePermission.isAllowed
+        let titlesAvailable = ScreenCapturePermission.isAllowed || AccessibilityPermission.isTrusted
         let view = PickerOverlayView(
             model: overlayModel,
-            screenRecordingAllowed: screenRecordingAllowed,
-            onRequestScreenRecording: { ScreenCapturePermission.request() },
+            titlesAvailable: titlesAvailable,
+            onRequestTitles: { AccessibilityPermission.request() },
             onSavePreset: { [weak self] rules, presetMode, name, existingID in
                 self?.upsertPreset(rules: rules, mode: presetMode, name: name, existingID: existingID)
             },

@@ -120,8 +120,9 @@ final class PickerOverlayModel {
 /// Full-screen exposé-style allowlist picker.
 struct PickerOverlayView: View {
     @Bindable var model: PickerOverlayModel
-    let screenRecordingAllowed: Bool
-    let onRequestScreenRecording: () -> Void
+    /// Window titles are available (Screen Recording or Accessibility granted).
+    let titlesAvailable: Bool
+    let onRequestTitles: () -> Void
     /// Creates or updates the named preset (rules + mode) and returns its id,
     /// or nil when the name is empty.
     let onSavePreset: (_ rules: [Rule], _ mode: Mode, _ name: String, _ existingID: UUID?) -> UUID?
@@ -184,15 +185,15 @@ struct PickerOverlayView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 220)
             }
-            if !screenRecordingAllowed {
+            if !titlesAvailable {
                 Button {
-                    onRequestScreenRecording()
+                    onRequestTitles()
                 } label: {
-                    Label("Enable window titles", systemImage: "record.circle")
+                    Label("Enable window titles", systemImage: "accessibility")
                         .font(.caption)
                 }
                 .controlSize(.small)
-                .help("Window titles need the Screen Recording permission. Whole-app picks work without it — reopen the picker after granting to see per-window titles.")
+                .help("Window titles need the Accessibility permission (window-level locking uses it too). Whole-app picks work without it — reopen the picker after granting to pick single windows.")
             }
         }
         .padding(.horizontal, 20)
@@ -280,7 +281,7 @@ struct PickerOverlayView: View {
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                 }
-                Text(whole ? "included with app" : (window.title == nil ? "titles need Screen Recording" : "click for details"))
+                Text(whole ? "included with app" : (window.title == nil ? "title needs Accessibility" : "click for details"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -305,7 +306,7 @@ struct PickerOverlayView: View {
 
     private func windowTitleHelp(_ window: PickerWindowInfo, app: PickerAppInfo) -> String {
         if model.isWhole(app) { return "\(app.name) is included as a whole app" }
-        if window.title == nil { return "Window titles need the Screen Recording permission — include \(app.name) as a whole app instead" }
+        if window.title == nil { return "This window has no readable title (grant Accessibility for titles) — include \(app.name) as a whole app instead" }
         return "Allow only this window of \(app.name)"
     }
 

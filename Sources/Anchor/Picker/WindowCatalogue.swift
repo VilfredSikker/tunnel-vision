@@ -21,6 +21,58 @@ enum ScreenCapturePermission {
     }
 }
 
+// MARK: - Accessibility (window titles without Screen Recording)
+
+/// Window titles come from the Accessibility API when Screen Recording is
+/// not granted. Layer 2 (window-level locking) needs Accessibility anyway,
+/// and unlike Screen Recording it has no periodic re-approval nag.
+enum AccessibilityPermission {
+    static var isTrusted: Bool {
+        AXIsProcessTrusted()
+    }
+
+    /// System prompt with a deep link to Privacy & Security > Accessibility.
+    static func request() {
+        // kAXTrustedCheckOptionPrompt by value: the imported global is a
+        // `var`, which Swift 6 refuses to read across isolation.
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        AXIsProcessTrustedWithOptions(options)
+    }
+}
+
+/// Private but long-stable (yabai, AltTab and Rectangle rely on it): the
+/// CGWindowID behind an accessibility window element, which is what matches
+/// AX titles to CGWindowList entries.
+@_silgen_name("_AXUIElementGetWindow")
+private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: inout CGWindowID) -> AXError
+
+enum AccessibilityTitles {
+    /// Titles of the given apps' windows keyed by CGWindowID; empty without
+    /// the permission. A busy or frozen app is skipped after a short timeout
+    /// instead of stalling the picker.
+    static func titles(forPIDs pids: [pid_t]) -> [CGWindowID: String] {
+        guard AXIsProcessTrusted() else { return [:] }
+        var titles: [CGWindowID: String] = [:]
+        for pid in pids {
+            let application = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(application, 0.25)
+            var windowsValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+                  let windows = windowsValue as? [AXUIElement] else { continue }
+            for window in windows {
+                var windowID: CGWindowID = 0
+                guard _AXUIElementGetWindow(window, &windowID) == .success, windowID != 0 else { continue }
+                var titleValue: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success,
+                      let title = (titleValue as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !title.isEmpty else { continue }
+                titles[windowID] = title
+            }
+        }
+        return titles
+    }
+}
+
 // MARK: - Catalogue
 
 /// One on-screen window of another app.
@@ -81,17 +133,27 @@ enum WindowCatalogue {
                 icon: app.icon
             )
         }
-        return assemble(apps: apps, windows: onScreenWindows(), selfPID: ProcessInfo.processInfo.processIdentifier)
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        // CGWindowList carries titles only with Screen Recording; otherwise
+        // the Accessibility API supplies them per window id.
+        var extraTitles: [CGWindowID: String] = [:]
+        if !ScreenCapturePermission.isAllowed {
+            let pids = apps.filter { $0.activationPolicy == .regular && $0.pid != selfPID }.map(\.pid)
+            extraTitles = AccessibilityTitles.titles(forPIDs: pids)
+        }
+        return assemble(apps: apps, windows: onScreenWindows(), extraTitles: extraTitles, selfPID: selfPID)
     }
 
     /// Pure grouping and filtering. Only regular apps other than ourselves
     /// are listed — background agents, menu-bar helpers and system UI never
     /// appear in Cmd-Tab and cannot be picked here either. A regular app with
     /// no window on this Space (hidden, minimised, elsewhere) is still listed
-    /// so it can be allowed as a whole app.
+    /// so it can be allowed as a whole app. `extraTitles` fills in titles the
+    /// window list did not carry (Accessibility, keyed by window id).
     nonisolated static func assemble(
         apps: [RunningAppRecord],
         windows: [WindowRecord],
+        extraTitles: [CGWindowID: String] = [:],
         selfPID: pid_t
     ) -> [PickerAppInfo] {
         var windowsByPID: [pid_t: [PickerWindowInfo]] = [:]
@@ -101,9 +163,10 @@ enum WindowCatalogue {
                bounds.width < minimumWindowSize.width || bounds.height < minimumWindowSize.height {
                 continue
             }
-            let title = window.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let listed = window.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = listed?.isEmpty == false ? listed : extraTitles[window.id]
             windowsByPID[window.ownerPID, default: []].append(
-                PickerWindowInfo(id: window.id, appPID: window.ownerPID, title: title?.isEmpty == false ? title : nil)
+                PickerWindowInfo(id: window.id, appPID: window.ownerPID, title: title)
             )
         }
 

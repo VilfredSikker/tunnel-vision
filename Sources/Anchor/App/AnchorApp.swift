@@ -22,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var enforcer: AppEnforcer?
     private var noticeController: BlockedNoticeController?
+    private var hotKeys: HotKeyCenter?
+    private var countdownWindow: CountdownWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // The .app bundle already sets LSUIElement; this also keeps `swift run`
@@ -41,6 +43,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let status = StatusItemController(model: model)
         status.install()
         statusItemController = status
+
+        // The global shortcut toggles the panel like a click on the item; the
+        // floating countdown shows itself while a session or break runs.
+        let hotKeys = HotKeyCenter()
+        hotKeys.onTogglePanel = { [weak status] in status?.togglePanel() }
+        self.hotKeys = hotKeys
+        applyHotKeySetting()
+        countdownWindow = CountdownWindowController(model: model)
 
         // Layer 1 enforcement follows the session: locked while a task runs
         // (work or paused), unlocked on break/idle. Frozen victims are thawed
@@ -65,6 +75,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.noticeController = notice
         enforcer.onBlockedApp = { [weak notice] name, bundleID in
             notice?.show(appName: name, bundleID: bundleID)
+        }
+    }
+
+    /// Re-registers the shortcut whenever settings change.
+    private func applyHotKeySetting() {
+        withObservationTracking {
+            hotKeys?.registerToggle(model.settings.toggleHotKey)
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.applyHotKeySetting()
+            }
         }
     }
 

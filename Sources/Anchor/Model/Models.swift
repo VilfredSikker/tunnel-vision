@@ -185,8 +185,60 @@ struct Settings: Codable, Equatable, Sendable {
     var defaultMode: Mode = .dark
     /// Play sounds at session and break end.
     var soundOn: Bool = true
+    /// Global shortcut that opens or closes the panel. Nil: none.
+    var toggleHotKey: HotKey?
+    /// Small always-on-top countdown while a session or break runs.
+    var showCountdownWindow: Bool = true
 
     static let `default` = Settings()
+
+    enum CodingKeys: String, CodingKey {
+        case workSeconds, breakSeconds, strictMode, defaultMode, soundOn, toggleHotKey, showCountdownWindow
+    }
+}
+
+extension Settings {
+    /// Every key is optional on read so archives written by an older build
+    /// keep decoding (the synthesized decoder would reject them, and a
+    /// rejected archive gets quarantined and reseeded).
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let base = Settings()
+        workSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .workSeconds) ?? base.workSeconds
+        breakSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .breakSeconds) ?? base.breakSeconds
+        strictMode = try container.decodeIfPresent(Bool.self, forKey: .strictMode) ?? base.strictMode
+        defaultMode = try container.decodeIfPresent(Mode.self, forKey: .defaultMode) ?? base.defaultMode
+        soundOn = try container.decodeIfPresent(Bool.self, forKey: .soundOn) ?? base.soundOn
+        toggleHotKey = try container.decodeIfPresent(HotKey.self, forKey: .toggleHotKey)
+        showCountdownWindow = try container.decodeIfPresent(Bool.self, forKey: .showCountdownWindow) ?? base.showCountdownWindow
+    }
+}
+
+// MARK: - Hot key
+
+/// A global keyboard shortcut, stored as a Carbon key code plus Carbon
+/// modifier flags so it registers without translation. `keyLabel` is what
+/// the key printed as when it was recorded (layouts differ); display only.
+struct HotKey: Codable, Equatable, Hashable, Sendable {
+    var keyCode: UInt32
+    var carbonModifiers: UInt32
+    var keyLabel: String
+
+    // Carbon's cmdKey, shiftKey, optionKey, controlKey.
+    static let command: UInt32 = 1 << 8
+    static let shift: UInt32 = 1 << 9
+    static let option: UInt32 = 1 << 11
+    static let control: UInt32 = 1 << 12
+
+    /// Modifiers in the system's canonical order (⌃⌥⇧⌘), then the key.
+    var display: String {
+        var text = ""
+        if carbonModifiers & Self.control != 0 { text += "⌃" }
+        if carbonModifiers & Self.option != 0 { text += "⌥" }
+        if carbonModifiers & Self.shift != 0 { text += "⇧" }
+        if carbonModifiers & Self.command != 0 { text += "⌘" }
+        return text + keyLabel
+    }
 }
 
 // MARK: - Persisted archive

@@ -10,6 +10,8 @@ struct SettingsView: View {
     @State private var defaultMode: Mode
     @State private var strictMode: Bool
     @State private var soundOn: Bool
+    @State private var toggleHotKey: HotKey?
+    @State private var showCountdownWindow: Bool
 
     init(model: AppState) {
         self.model = model
@@ -19,6 +21,8 @@ struct SettingsView: View {
         _defaultMode = State(initialValue: settings.defaultMode)
         _strictMode = State(initialValue: settings.strictMode)
         _soundOn = State(initialValue: settings.soundOn)
+        _toggleHotKey = State(initialValue: settings.toggleHotKey)
+        _showCountdownWindow = State(initialValue: settings.showCountdownWindow)
     }
 
     var body: some View {
@@ -53,8 +57,36 @@ struct SettingsView: View {
                 Toggle("Sounds", isOn: $soundOn)
             }
 
+            Section("Shortcut") {
+                LabeledContent("Open or close Anchor") {
+                    HStack(spacing: 6) {
+                        ShortcutRecorder(hotKey: $toggleHotKey)
+                        if toggleHotKey != nil {
+                            Button {
+                                toggleHotKey = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Remove the shortcut")
+                        }
+                    }
+                }
+                Text("Works from any app. Click the field and press the keys; Esc cancels, Delete clears.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Countdown") {
+                Toggle("Floating countdown while a session runs", isOn: $showCountdownWindow)
+                Text("A small always-on-top timer for when the menu bar is out of sight, such as in full-screen apps. Drag it anywhere.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Coming in the next build") {
-                Text("Per-window and per-URL discipline (window-level matching via Accessibility, site rules inside browsers), hotkeys, launch at login, browsers to manage, and picker support on every display are next; their settings land here.")
+                Text("Per-window and per-URL discipline (window-level matching via Accessibility, site rules inside browsers), launch at login, shortcuts for start/pause and the picker, browsers to manage, and picker support on every display are next; their settings land here.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -66,6 +98,8 @@ struct SettingsView: View {
         .onChange(of: defaultMode) { _, _ in apply() }
         .onChange(of: strictMode) { _, _ in apply() }
         .onChange(of: soundOn) { _, _ in apply() }
+        .onChange(of: toggleHotKey) { _, _ in apply() }
+        .onChange(of: showCountdownWindow) { _, _ in apply() }
     }
 
     private func apply() {
@@ -74,7 +108,9 @@ struct SettingsView: View {
             breakSeconds: TimeInterval(breakMinutes * 60),
             strictMode: strictMode,
             defaultMode: defaultMode,
-            soundOn: soundOn
+            soundOn: soundOn,
+            toggleHotKey: toggleHotKey,
+            showCountdownWindow: showCountdownWindow
         ))
     }
 }

@@ -56,9 +56,23 @@ final class StatusItemController: NSObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.popover.performClose(nil)
+                guard let self, self.attachedSheet == nil else { return }
+                self.popover.performClose(nil)
             }
         }
+    }
+
+    /// A sheet on the popover (task editor, presets manager) means the user
+    /// is mid-edit. The popover must never auto-close underneath it: the
+    /// sheet stays attached but invisible, and when the popover reopens the
+    /// hidden sheet keeps it modal — every control dead, no way to add a task.
+    private var attachedSheet: NSWindow? {
+        popover.contentViewController?.view.window?.attachedSheet
+    }
+
+    /// Global shortcut entry point: the same toggle as a click on the item.
+    func togglePanel() {
+        togglePopover()
     }
 
     // MARK: - Menu bar label
@@ -115,7 +129,9 @@ final class StatusItemController: NSObject {
         guard let button = statusItem?.button else { return }
         let eventType = NSApp.currentEvent?.type
         if eventType == .rightMouseUp {
-            popover.performClose(nil)
+            if attachedSheet == nil {
+                popover.performClose(nil)
+            }
             let menu = buildQuickMenu()
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
         } else {
@@ -126,7 +142,13 @@ final class StatusItemController: NSObject {
     private func togglePopover() {
         guard let button = statusItem?.button else { return }
         if popover.isShown {
-            popover.performClose(nil)
+            if let sheet = attachedSheet {
+                // Mid-edit: bring the sheet back instead of closing under it.
+                NSApp.activate(ignoringOtherApps: true)
+                sheet.makeKeyAndOrderFront(nil)
+            } else {
+                popover.performClose(nil)
+            }
         } else {
             resizePopoverToFit()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -279,6 +301,7 @@ final class StatusItemController: NSObject {
         outsideMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self, self.popover.isShown, let clicked = event.window else { return event }
             guard let popoverWindow = self.popover.contentViewController?.view.window else { return event }
+            if self.attachedSheet != nil { return event }
             if clicked === popoverWindow { return event }
             if clicked === self.statusItem?.button?.window { return event }
             if clicked.sheetParent === popoverWindow { return event }
