@@ -221,3 +221,54 @@ Two small additions make upfront configuration mostly unnecessary:
   preset so the common path is one click.
 - "Save current as preset" snapshots the picker state. Presets live as a JSON file in
   Application Support so they can be edited or versioned by hand.
+
+## Layers 2 and 3 as built (2026-09-03)
+
+Layer 2 (`WindowEnforcer`): an app allowed only through window rules keeps the
+windows whose title matched a rule; every other standard window in it is minimised
+through `kAXMinimizedAttribute` and brought back at session end. A window that matched
+once stays allowed for the session by CGWindowID (via `_AXUIElementGetWindow`), so an
+editor switching files does not lose its window; new windows are judged by title. An
+`AXObserver` per app (window created, focused, deminiaturised, retitled) triggers a
+sweep, with a one-second sweep as the safety net. Untitled windows get 1.5 s of grace
+before they count as non-matching. Dialogs, sheets and palettes are ignored. Without
+the Accessibility permission the layer is inert and a window rule allows the whole app.
+
+Layer 3: option 3a (Chromium policy through `defaults write`) was not built. From
+Chromium's `policy_loader_mac` source (recalled, not re-read in this session), the Mac
+loader only watches `/Library/Managed Preferences/<user>/<bundle>.plist` and otherwise
+reloads on a 15-minute timer, so a user-level write would not be seen at session start,
+and Firefox reads policies only at launch. The spike is still worth 20 minutes if the
+badge-free extension route ever matters.
+
+Built 3b instead (`BrowserEnforcer`): once a second, each managed browser that is
+running and has site rules is asked over its scripting dictionary for every window's
+id, title, minimised state, active tab and tab URLs. A window whose active tab is a web
+page off the allowlist is steered: to another tab of the same window that is allowed,
+else back to the page it last showed while allowed, else to the first site rule as a
+URL. Non-web pages (`chrome://newtab`, `about:blank`) never count. Site rules are
+`host[/path]` patterns matching the host and its subdomains and the path at a segment
+boundary; the picker offers "this page" or "whole site" per browser window. Safari and
+the Chromium family are supported; Firefox is not scriptable and its site rules allow
+the whole app. Settings lists the installed browsers with a switch each. A browser that
+declines Automation is left alone. Nothing is persisted, so a crash leaves the browser
+as it is.
+
+## Control socket and MCP (2026-09-03)
+
+Tunnel Vision listens on `~/Library/Application Support/TunnelVision/control.sock` (mode 0600,
+newline-delimited JSON, `{"id","method","params"}` in, `{"id","result"|"error"}` out)
+while it runs. `ControlAPI` maps the methods onto the model: `state.get`,
+`tasks.list|add|update|delete|reorder|set_done`, `presets.list|create|update|delete`,
+`session.start|pause|resume|stop|done|skip_break|extend`, `apps.list`. Rules are
+`{bundle_id|app, scope, pattern}`; an app name resolves through running apps and
+/Applications.
+
+`tunnelvision-mcp` (Sources/TunnelVisionMCP, bundled at `TunnelVision.app/Contents/Helpers/tunnelvision-mcp`)
+is a stdio MCP server exposing those methods as `tunnelvision_*` tools and forwarding each
+call over the socket; if the socket is missing it launches Tunnel Vision with `open -b` and
+waits for it. Register with `make mcp-register` (runs `claude mcp add --scope user
+tunnelvision -- …/tunnelvision-mcp`). The wire format, the blocking client, the JSON-RPC handling
+and the tool schemas live in the `TunnelVisionControlKit` library so both executables and
+the tests share them. Editing `data.json` directly while the app runs would be
+clobbered by the app's next persist, which is why the socket exists.

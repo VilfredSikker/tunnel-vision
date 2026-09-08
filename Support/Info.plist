@@ -5,15 +5,15 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>Anchor</string>
+	<string>TunnelVision</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.anchor.timer</string>
+	<string>com.tunnelvision.timer</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Anchor</string>
+	<string>TunnelVision</string>
 	<key>CFBundleDisplayName</key>
-	<string>Anchor</string>
+	<string>Tunnel Vision</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -24,6 +24,8 @@
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Tunnel Vision asks your browser for the address of each open window so you can pick a window by its URL, and steers browser windows during a session.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>

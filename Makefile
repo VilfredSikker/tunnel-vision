@@ -15,7 +15,12 @@ app:
 	scripts/make-app.sh release
 
 run: app
-	open build/Anchor.app
+	open build/TunnelVision.app
 
 clean:
 	rm -rf .build build
+
+# Registers the bundled MCP server with Claude Code (user scope) so an agent
+# can read and shape tasks, presets and the session through the running app.
+mcp-register: app
+	claude mcp add --scope user tunnelvision -- "$(CURDIR)/build/TunnelVision.app/Contents/Helpers/tunnelvision-mcp"

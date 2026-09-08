@@ -15,6 +15,7 @@ and dark appearance.
 ## Vocabulary
 
 - Task: a thing to do, with a title, a duration, and a preset or custom allowlist.
+  One-off by default; can be flagged to repeat daily.
 - Session: one timed run of a task. Ends on timer, on "done", or on an early stop.
 - Break: the untimed or short timed pause after a session. Everything is unlocked.
 - Preset: a named, reusable allowlist plus a default mode. Built-in or user made.
@@ -41,9 +42,13 @@ and dark appearance.
 - Preset chip on the current task, click to change or edit.
 - Today's task list below: reorder by drag, check off, add inline. Each row shows
   title, duration, preset name and a small icon strip of the allowed apps.
+- Tasks are one-off by default: checking one off retires it for the day and it
+  does not come back tomorrow. Tasks flagged "repeat daily" come back each day
+  (a checked-off repeating task stays offered, and shows again under open after
+  the day turns).
 - Add task: title, duration picker with defaults of 25 and 50 minutes, preset dropdown
-  pre-filled with the last used preset, and an "edit allowlist" link that opens the
-  picker overlay.
+  pre-filled with the last used preset, an "edit allowlist" link that opens the
+  picker overlay, and a repeat daily toggle.
 - Footer: presets, settings, quit.
 
 ### 3. Picker overlay (the exposé)
@@ -101,8 +106,8 @@ and dark appearance.
 - Sounds and notifications.
 - Launch at login.
 - Hotkeys: start or pause, open picker, hotkey pick.
-- Browsers to manage, with a note that a managed badge appears in the browser while a
-  session runs.
+- Browsers to manage, with a note that each browser asks once for Automation permission
+  and that windows off the allowed sites are steered back during a session.
 
 ## Design constraints
 
