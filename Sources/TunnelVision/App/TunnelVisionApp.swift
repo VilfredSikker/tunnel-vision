@@ -45,9 +45,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let window = notification.object as? NSWindow,
-              self?.isSettingsWindow(window) == true else { return }
-            window.center()
+            let window = notification.object as? NSWindow
+            Task { @MainActor in
+                guard let window, let self, self.isSettingsWindow(window) else { return }
+                window.center()
+            }
         }
 
         // One instance only: two enforcers would fight over the victim store.
