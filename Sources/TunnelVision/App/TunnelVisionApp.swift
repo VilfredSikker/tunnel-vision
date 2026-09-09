@@ -37,21 +37,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // development launches free of a Dock icon.
         NSApp.setActivationPolicy(.accessory)
 
-        // The SwiftUI Settings scene remembers its last position via AppKit's
-        // frame autosave. If that position was on a now-disconnected display,
-        // the window opens off-screen. Center it whenever it becomes main.
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.didBecomeMainNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            let window = notification.object as? NSWindow
-            Task { @MainActor in
-                guard let window, let self, self.isSettingsWindow(window) else { return }
-                window.center()
-            }
-        }
-
         // One instance only: two enforcers would fight over the victim store.
         let otherInstances = NSRunningApplication
             .runningApplications(withBundleIdentifier: "com.tunnelvision.timer")
@@ -219,16 +204,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowEnforcer?.unlock()
         browserEnforcer?.unlock()
         controlServer?.stop()
-    }
-
-    // MARK: - Settings window visibility
-
-    private func isSettingsWindow(_ window: NSWindow) -> Bool {
-        let mask = window.styleMask
-        // The only titled, closable, non-resizable window in the app. The
-        // countdown is borderless; the notice is a non-activating panel.
-        return mask.contains(.titled)
-            && mask.contains(.closable)
-            && !mask.contains(.resizable)
     }
 }
