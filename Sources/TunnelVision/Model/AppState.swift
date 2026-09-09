@@ -93,10 +93,6 @@ final class AppState {
         clock: @escaping () -> Date = { Date() },
         autoTick: Bool = true
     ) {
-        // Canonical storage location. This path is intentionally fixed — not
-        // derived from bundle ID or app name — so data survives app renames,
-        // reinstalls, and version upgrades. All Tunnel Vision installations on
-        // this machine share it.
         let fallback = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!
