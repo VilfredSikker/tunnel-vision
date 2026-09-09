@@ -68,8 +68,8 @@ if [ "$IDENTITY" = "-" ]; then
 else
   echo "==> codesign with identity: $IDENTITY_NAME"
 fi
-codesign --force --sign "$IDENTITY" "$APP/Contents/Helpers/tunnelvision-mcp"
-codesign --force --sign "$IDENTITY" "$APP"
+codesign --force --sign "$IDENTITY" --options runtime "$APP/Contents/Helpers/tunnelvision-mcp"
+codesign --force --sign "$IDENTITY" --options runtime "$APP"
 
 echo "==> verify"
 codesign --verify --strict "$APP"
