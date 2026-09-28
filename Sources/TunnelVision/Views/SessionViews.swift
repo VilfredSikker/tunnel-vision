@@ -17,9 +17,14 @@ struct SessionHeader: View {
                 editTaskRow(task)
             }
             if model.phase == .paused {
-                Text("Paused — resume when you are ready")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    Text(pauseCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if model.phase == .work, !model.lockWarningMessages.isEmpty {
+                lockWarnings
             }
         }
         .padding(.top, 14)
@@ -29,6 +34,28 @@ struct SessionHeader: View {
 
     private var fraction: Double {
         Theme.ringFraction(model.workElapsedFraction)
+    }
+
+    private var pauseCaption: String {
+        guard let endsAt = model.pauseEndsAt else { return "Paused" }
+        let left = max(0, Int(ceil(endsAt.timeIntervalSinceNow)))
+        return "Paused — the lock returns in \(TimeFormat.clock(left))"
+    }
+
+    /// Layers that cannot enforce what this session asks: the lock is
+    /// weaker than it looks, and the user should know.
+    private var lockWarnings: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(model.lockWarningMessages, id: \.self) { message in
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.1)))
     }
 
     private var ring: some View {

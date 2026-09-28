@@ -1,6 +1,7 @@
 import AppKit
 import os
 import SwiftUI
+import TunnelVisionControlKit
 
 @main
 struct TunnelVisionApp: App {
@@ -18,7 +19,7 @@ struct TunnelVisionApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let log = Logger(subsystem: "com.tunnelvision.timer", category: "app")
 
-    let model = AppState()
+    let model: AppState
     private var statusItemController: StatusItemController?
     private var enforcer: AppEnforcer?
     private var windowEnforcer: WindowEnforcer?
@@ -30,36 +31,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lockBroadcaster: LockBroadcaster?
     private var controlAPI: ControlAPI?
     private var controlServer: ControlServer?
+    private var phaseAlerts: PhaseAlertController?
+    private var toast: ToastController?
+    private var windowPick: WindowPickController?
+    private let terminationSignals = TerminationSignals()
     private var observedUnmanagedBrowsers: [String] = []
+
+    override init() {
+        // One instance only: two enforcers would fight over the victim store.
+        // Checked before the model exists, so a second copy never reads,
+        // seeds or quarantines the shared archive.
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: AppIdentity.bundleID)
+            .filter { !$0.isTerminated && $0.processIdentifier != selfPID }
+        if !others.isEmpty {
+            Self.log.info("another Tunnel Vision instance is running — quitting")
+            exit(0)
+        }
+        model = AppState()
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // The .app bundle already sets LSUIElement; this also keeps `swift run`
         // development launches free of a Dock icon.
         NSApp.setActivationPolicy(.accessory)
 
-        // The SwiftUI Settings scene remembers its last position via AppKit's
-        // frame autosave. If that position was on a now-disconnected display,
-        // the window opens off-screen. Center it whenever it becomes main.
+        // TERM, HUP and INT release the lock before exiting, so frozen apps
+        // are not left stopped until the next launch.
+        terminationSignals.install { [weak self] number in
+            Self.log.info("signal \(number) — releasing the lock and exiting")
+            self?.releaseLocks()
+            exit(0)
+        }
+
+        // The SwiftUI Settings scene restores its last frame via AppKit's
+        // autosave; a frame left on an unplugged display is pulled back.
         NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeMainNotification,
             object: nil,
             queue: .main
-        ) { [weak self] notification in
+        ) { notification in
+            // Read the window before the isolation hop: the notification
+            // itself is not Sendable. Delivered on the main queue, so no
+            // Task hop is needed, which would show the stale frame first.
             let window = notification.object as? NSWindow
-            Task { @MainActor in
-                guard let window, let self, self.isSettingsWindow(window) else { return }
+            MainActor.assumeIsolated {
+                guard let window,
+                      SettingsWindowPlacement.isSettingsWindow(window),
+                      SettingsWindowPlacement.needsRecentering(
+                          frame: window.frame,
+                          visibleFrames: NSScreen.screens.map(\.visibleFrame)
+                      ) else { return }
                 window.center()
             }
-        }
-
-        // One instance only: two enforcers would fight over the victim store.
-        let otherInstances = NSRunningApplication
-            .runningApplications(withBundleIdentifier: "com.tunnelvision.timer")
-            .filter { !$0.isTerminated && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
-        if !otherInstances.isEmpty {
-            Self.log.info("another Tunnel Vision instance is running — quitting")
-            NSApp.terminate(nil)
-            return
         }
 
         let status = StatusItemController(model: model)
@@ -75,6 +100,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observedUnmanagedBrowsers = model.settings.unmanagedBrowsers
         applySettings()
         countdownWindow = CountdownWindowController(model: model)
+        phaseAlerts = PhaseAlertController(model: model)
+        let toast = ToastController(anchorWindow: { [weak status] in status?.statusButtonWindow })
+        self.toast = toast
 
         // Enforcement follows the session: locked while a task runs (work or
         // paused), unlocked on break/idle. Layer 1 polices whole apps (frozen
@@ -97,9 +125,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             taskTitle: { [weak model] in model?.activeTask?.title ?? "this task" }
         )
         self.herdrGuard = herdrGuard
+
+        // A layer that cannot enforce what the session asks says so in the
+        // session header.
+        windowEnforcer.onWarning = { [weak model] in model?.setLockWarning($0, layer: "window") }
+        browserEnforcer.onWarning = { [weak model] in model?.setLockWarning($0, layer: "browser") }
+        herdrGuard.onWarning = { [weak model] in model?.setLockWarning($0, layer: "herdr") }
+
         let broadcaster = LockBroadcaster([enforcer, windowEnforcer, browserEnforcer, herdrGuard])
         lockBroadcaster = broadcaster
         model.lockListener = broadcaster
+
+        model.urlOpener = { urls in
+            for url in urls {
+                NSWorkspace.shared.open(url)
+            }
+        }
+        model.onSessionStarted = { [weak self] task in
+            self?.confirmLock(for: task)
+        }
+        model.onPauseLimitReached = { [weak self] in
+            guard let self, let task = self.model.activeTask else { return }
+            self.toast?.show(
+                title: "Pause over: back to “\(task.title)”",
+                detail: "Pauses end after \(TimeFormat.minutes(AppState.maxPauseSeconds)); the lock is on again.",
+                symbol: "lock.fill"
+            )
+        }
 
         let notice = BlockedNoticeController(
             anchorWindow: { [weak status] in status?.statusButtonWindow },
@@ -125,6 +177,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             notice?.show(.site(appName: appName, bundleID: bundleID, host: host))
         }
 
+        let pick = WindowPickController()
+        pick.onHold = { [weak enforcer, weak windowEnforcer] on in
+            enforcer?.hold(on)
+            windowEnforcer?.hold(on)
+        }
+        pick.onPicked = { [weak self] window in
+            self?.allowPicked(window)
+        }
+        windowPick = pick
+
         // The control socket lets tunnelvision-mcp (and anything else local) read
         // and shape tasks, presets and the session.
         let api = ControlAPI(model: model)
@@ -137,6 +199,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controlServer = server
         } catch {
             Self.log.error("control socket not started: \(String(describing: error), privacy: .public)")
+        }
+
+        if !model.settings.onboardingDone {
+            OnboardingWindowController.shared.show(model: model)
         }
     }
 
@@ -152,6 +218,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.startOrPause()
         case .openPicker:
             openPickerForTaskAtHand()
+        case .pickWindow:
+            guard model.activeLock != nil else {
+                toast?.show(
+                    title: "Nothing to pick for",
+                    detail: "The window pick works while a locked session runs.",
+                    symbol: "cursorarrow.click.2"
+                )
+                return
+            }
+            windowPick?.toggle()
         }
     }
 
@@ -192,6 +268,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// A picked window inside an app judged by window title is allowed by
+    /// its title; anything else is allowed as a whole app.
+    private func allowPicked(_ window: PickedWindow) {
+        let title = window.title.trimmingCharacters(in: .whitespaces)
+        if let windowEnforcer, windowEnforcer.disciplines(bundleID: window.bundleID), !title.isEmpty {
+            windowEnforcer.allowForSession(bundleID: window.bundleID, titlePattern: title)
+            toast?.show(
+                title: "Allowed for this session",
+                detail: "“\(title)” in \(window.appName)",
+                symbol: "checkmark.circle.fill"
+            )
+        } else {
+            enforcer?.allowForSession(bundleID: window.bundleID)
+            toast?.show(
+                title: "Allowed for this session",
+                detail: "\(window.appName), all windows",
+                symbol: "checkmark.circle.fill"
+            )
+        }
+    }
+
+    /// "A short confirmation shows what is now locked" (DESIGN_BRIEF §5).
+    private func confirmLock(for task: TaskItem) {
+        guard let lock = model.activeLock else { return }
+        // The lock's first sweep may already have shown a blocked notice in
+        // the same spot; the summary covers what it said.
+        noticeController?.dismiss()
+        let summary = LockSummary.describe(rules: lock.rules, mode: lock.mode) { bundleID in
+            AppCatalog.displayName(forBundleID: bundleID) ?? bundleID
+        }
+        toast?.show(title: "Locked to “\(task.title)”", detail: summary, symbol: "lock.fill")
+    }
+
     /// Re-registers the shortcuts whenever settings change, and relocks when
     /// the managed browsers changed so the browser layer follows.
     private func applySettings() {
@@ -211,24 +320,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: Quit
+
+    /// Quitting mid-session is an early end, with the same friction as the
+    /// Stop button's menu equivalent. Logout, restart and shutdown pass
+    /// straight through; the lock is released in `applicationWillTerminate`.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard model.phase == .work || model.phase == .paused, let task = model.activeTask else { return .terminateNow }
+        if EarlyEndConfirmation.isSystemQuit { return .terminateNow }
+        guard EarlyEndConfirmation.confirm(taskTitle: task.title, strict: model.settings.strictMode, action: "End and Quit") else {
+            return .terminateCancel
+        }
+        model.stopNow()
+        return .terminateNow
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        // Clean quit mid-session: unlock so frozen apps thaw, hidden apps
-        // come back and minimised windows return, matching the crash-safe
-        // pid store for the hard-kill case.
+        releaseLocks()
+    }
+
+    /// Clean exit mid-session: unlock so frozen apps thaw, hidden apps come
+    /// back and minimised windows return, matching the crash-safe pid store
+    /// for the hard-kill case.
+    private func releaseLocks() {
+        windowPick?.disarm()
         enforcer?.unlock()
         windowEnforcer?.unlock()
         browserEnforcer?.unlock()
         controlServer?.stop()
-    }
-
-    // MARK: - Settings window visibility
-
-    private func isSettingsWindow(_ window: NSWindow) -> Bool {
-        let mask = window.styleMask
-        // The only titled, closable, non-resizable window in the app. The
-        // countdown is borderless; the notice is a non-activating panel.
-        return mask.contains(.titled)
-            && mask.contains(.closable)
-            && !mask.contains(.resizable)
+        // Window restores go out in the background; the process is about
+        // to exit, so wait for them.
+        windowEnforcer?.drainWrites(timeout: 1.5)
     }
 }

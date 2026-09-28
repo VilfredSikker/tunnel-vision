@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var newTaskHotKey: HotKey?
     @State private var startPauseHotKey: HotKey?
     @State private var pickerHotKey: HotKey?
+    @State private var pickWindowHotKey: HotKey?
     @State private var showCountdownWindow: Bool
     @State private var countdownStyle: CountdownStyle
     @State private var unmanagedBrowsers: Set<String>
@@ -35,6 +36,7 @@ struct SettingsView: View {
         _newTaskHotKey = State(initialValue: settings.newTaskHotKey)
         _startPauseHotKey = State(initialValue: settings.startPauseHotKey)
         _pickerHotKey = State(initialValue: settings.pickerHotKey)
+        _pickWindowHotKey = State(initialValue: settings.pickWindowHotKey)
         _showCountdownWindow = State(initialValue: settings.showCountdownWindow)
         _countdownStyle = State(initialValue: settings.countdownStyle)
         _unmanagedBrowsers = State(initialValue: Set(settings.unmanagedBrowsers))
@@ -91,7 +93,8 @@ struct SettingsView: View {
                 shortcutRow(.newTask, hotKey: $newTaskHotKey)
                 shortcutRow(.startPause, hotKey: $startPauseHotKey)
                 shortcutRow(.openPicker, hotKey: $pickerHotKey)
-                Text("Work from any app. Click a field and press the keys; Esc cancels, Delete clears. Start or pause starts the next task when nothing runs. The picker opens for the running task, else the next one up.")
+                shortcutRow(.pickWindow, hotKey: $pickWindowHotKey)
+                Text("Work from any app. Click a field and press the keys; Esc cancels, Delete clears. Start or pause starts the next task when nothing runs. The picker opens for the running task, else the next one up. During a session, the window shortcut allows the next window you click for the rest of the session.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -129,9 +132,11 @@ struct SettingsView: View {
             }
 
             Section("Permissions") {
-                TimelineView(.periodic(from: .now, by: 2)) { _ in
-                    permissionRows
+                PermissionSteps()
+                Button("Show the welcome guide…") {
+                    OnboardingWindowController.shared.show(model: model)
                 }
+                .controlSize(.small)
             }
         }
         .formStyle(.grouped)
@@ -155,6 +160,10 @@ struct SettingsView: View {
         }
         .onChange(of: pickerHotKey) { _, value in
             keepShortcutUnique(value, in: .openPicker)
+            apply()
+        }
+        .onChange(of: pickWindowHotKey) { _, value in
+            keepShortcutUnique(value, in: .pickWindow)
             apply()
         }
         .onChange(of: showCountdownWindow) { _, _ in apply() }
@@ -190,6 +199,7 @@ struct SettingsView: View {
         if slot != .newTask, newTaskHotKey == value { newTaskHotKey = nil }
         if slot != .startPause, startPauseHotKey == value { startPauseHotKey = nil }
         if slot != .openPicker, pickerHotKey == value { pickerHotKey = nil }
+        if slot != .pickWindow, pickWindowHotKey == value { pickWindowHotKey = nil }
     }
 
     private func managedBinding(_ bundleID: String) -> Binding<Bool> {
@@ -203,34 +213,6 @@ struct SettingsView: View {
                 }
             }
         )
-    }
-
-    @ViewBuilder
-    private var permissionRows: some View {
-        let trusted = AccessibilityPermission.isTrusted
-        LabeledContent("Accessibility") {
-            HStack(spacing: 8) {
-                Label(trusted ? "Granted" : "Not granted", systemImage: trusted ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(trusted ? Theme.allowed : .secondary)
-                    .font(.caption)
-                if !trusted {
-                    Button("Grant…") { AccessibilityPermission.request() }
-                        .controlSize(.small)
-                }
-            }
-        }
-        Text("Window rules need it: inside an app allowed by window, other windows are minimised, and the picker shows window titles. Without it, a window rule allows the whole app.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        LabeledContent("Automation") {
-            Button("Open System Settings…") {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!)
-            }
-            .controlSize(.small)
-        }
-        Text("Each managed browser asks once, the first time Tunnel Vision reads its windows. Declined browsers are left alone; re-enable them under Automation.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
     }
 
     private var launchAtLoginCaption: String {
@@ -256,20 +238,23 @@ struct SettingsView: View {
         }
     }
 
+    /// Starts from the stored settings so the ones this window does not
+    /// edit (task sort, onboarding) survive a change here.
     private func apply() {
-        model.updateSettings(Settings(
-            workSeconds: TimeInterval(workMinutes * 60),
-            breakSeconds: TimeInterval(breakMinutes * 60),
-            strictMode: strictMode,
-            defaultMode: defaultMode,
-            soundOn: soundOn,
-            toggleHotKey: toggleHotKey,
-            newTaskHotKey: newTaskHotKey,
-            startPauseHotKey: startPauseHotKey,
-            pickerHotKey: pickerHotKey,
-            showCountdownWindow: showCountdownWindow,
-            countdownStyle: countdownStyle,
-            unmanagedBrowsers: unmanagedBrowsers.sorted()
-        ))
+        var settings = model.settings
+        settings.workSeconds = TimeInterval(workMinutes * 60)
+        settings.breakSeconds = TimeInterval(breakMinutes * 60)
+        settings.strictMode = strictMode
+        settings.defaultMode = defaultMode
+        settings.soundOn = soundOn
+        settings.toggleHotKey = toggleHotKey
+        settings.newTaskHotKey = newTaskHotKey
+        settings.startPauseHotKey = startPauseHotKey
+        settings.pickerHotKey = pickerHotKey
+        settings.pickWindowHotKey = pickWindowHotKey
+        settings.showCountdownWindow = showCountdownWindow
+        settings.countdownStyle = countdownStyle
+        settings.unmanagedBrowsers = unmanagedBrowsers.sorted()
+        model.updateSettings(settings)
     }
 }

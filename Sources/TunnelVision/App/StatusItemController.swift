@@ -262,56 +262,13 @@ final class StatusItemController: NSObject {
         refreshLabel()
     }
 
+    /// The quick action must not bypass the friction that applies to early
+    /// stops: a warning, or typing the title in strict mode.
     @objc private func quickEndSession() {
         guard let task = model.activeTask else { return }
-        if model.settings.strictMode {
-            confirmEndStrict(taskTitle: task.title)
-        } else {
-            confirmEnd(taskTitle: task.title)
-        }
-    }
-
-    /// Normal mode: one warning dialog.
-    private func confirmEnd(taskTitle: String) {
-        let alert = NSAlert()
-        alert.messageText = "End the session early?"
-        alert.informativeText = "“\(taskTitle)” stops now and nothing is counted. Consider a break instead."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "End Session")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        if alert.runModal() == .alertFirstButtonReturn {
+        if EarlyEndConfirmation.confirm(taskTitle: task.title, strict: model.settings.strictMode) {
             model.stopNow()
             refreshLabel()
-        }
-    }
-
-    /// Strict mode: the quick action must not bypass the type-the-title
-    /// friction that applies to early stops.
-    private func confirmEndStrict(taskTitle: String) {
-        let alert = NSAlert()
-        alert.messageText = "End the session early?"
-        alert.informativeText = "Strict mode is on — type “\(taskTitle)” to confirm."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.placeholderString = "Task title"
-        alert.accessoryView = field
-        alert.addButton(withTitle: "End Session")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        // NSAlert does not focus accessory views on its own; without this the
-        // first keystrokes land on the buttons and the loop never sees text.
-        alert.window.initialFirstResponder = field
-        while true {
-            let response = alert.runModal()
-            if response != .alertFirstButtonReturn { return }
-            alert.window.initialFirstResponder = field
-            if field.stringValue.trimmingCharacters(in: .whitespaces) == taskTitle {
-                model.stopNow()
-                refreshLabel()
-                return
-            }
-            NSSound.beep()
-            field.stringValue = ""
         }
     }
 
