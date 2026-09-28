@@ -68,8 +68,15 @@ if [ "$IDENTITY" = "-" ]; then
 else
   echo "==> codesign with identity: $IDENTITY_NAME"
 fi
-codesign --force --sign "$IDENTITY" --options runtime "$APP/Contents/Helpers/tunnelvision-mcp"
-codesign --force --sign "$IDENTITY" --options runtime "$APP"
+# Notarization wants a secure timestamp; ad-hoc and development builds skip
+# it so they build offline.
+case "$IDENTITY_NAME" in
+  "Developer ID Application"*) TIMESTAMP="--timestamp" ;;
+  *) TIMESTAMP="--timestamp=none" ;;
+esac
+codesign --force --sign "$IDENTITY" --options runtime "$TIMESTAMP" "$APP/Contents/Helpers/tunnelvision-mcp"
+codesign --force --sign "$IDENTITY" --options runtime "$TIMESTAMP" \
+  --entitlements "Support/TunnelVision.entitlements" "$APP"
 
 echo "==> verify"
 codesign --verify --strict "$APP"
