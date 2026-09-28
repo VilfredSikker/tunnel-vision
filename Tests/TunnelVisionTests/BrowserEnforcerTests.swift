@@ -203,6 +203,87 @@ final class BrowserEnforcerTests: XCTestCase {
         XCTAssertNil(warnings.last ?? "still warning", "unlock clears it")
     }
 
+    /// A picked browser window keeps whatever site it shows for the session,
+    /// also after navigating renames it (a browser window is named after
+    /// its active tab).
+    func testAPickedWindowIsLeftAloneAsItNavigates() async {
+        let fake = FakeBrowserScripting()
+        fake.running = [helium]
+        fake.states[helium] = [
+            window(1, name: "Design review", urls: ["https://figma.example/file"]),
+            window(2, name: "Other", urls: ["https://news.example"]),
+        ]
+        let enforcer = makeEnforcer(fake)
+        enforcer.lock(rules: [Rule(bundleID: helium, scope: .url, pattern: "github.com")])
+        XCTAssertTrue(enforcer.governs(bundleID: helium))
+
+        enforcer.allowWindowForSession(bundleID: helium, title: "Design review")
+        await enforcer.sweep()
+        XCTAssertEqual(fake.navigated.map(\.window), [2], "only the other window is steered")
+
+        fake.states[helium] = [window(1, name: "Hacker News", urls: ["https://news.example"])]
+        await enforcer.sweep()
+        XCTAssertEqual(fake.navigated.map(\.window), [2], "the picked window keeps its allowance under a new title")
+
+        enforcer.unlock()
+        enforcer.lock(rules: [Rule(bundleID: helium, scope: .url, pattern: "github.com")])
+        await enforcer.sweep()
+        XCTAssertEqual(fake.navigated.map(\.window), [2, 1], "the allowance ends with the session")
+    }
+
+    /// The picked title comes from Accessibility, window names from
+    /// scripting; one may carry the browser's name as a suffix.
+    func testAPickedTitleFindsItsWindowAcrossTitleSources() {
+        let windows = [
+            window(1, name: "Inbox", urls: []),
+            window(2, name: "Design review", urls: []),
+            window(3, name: "Design review notes", urls: []),
+        ]
+        XCTAssertEqual(BrowserLockPolicy.window(titled: "Design review", in: windows)?.id, 2, "an exact name wins")
+        XCTAssertEqual(BrowserLockPolicy.window(titled: "Inbox - Google Chrome", in: windows)?.id, 1)
+        XCTAssertNil(BrowserLockPolicy.window(titled: "Calendar", in: windows))
+        XCTAssertNil(BrowserLockPolicy.window(titled: "  ", in: windows))
+
+        let videos = [window(1, name: "YouTube", urls: []), window(2, name: "YouTube - Talk", urls: [])]
+        XCTAssertEqual(BrowserLockPolicy.window(titled: "YouTube - Talk - Google Chrome", in: videos)?.id, 2,
+                       "the closest match wins, whatever the window order")
+    }
+
+    /// A pick that finds no window is reported and dropped, so it cannot
+    /// catch a different window with that title later.
+    func testAnUnmatchedPickIsReportedAndDropped() async {
+        let fake = FakeBrowserScripting()
+        fake.running = [helium]
+        fake.states[helium] = [window(1, name: "Other", urls: ["https://news.example"])]
+        let enforcer = makeEnforcer(fake)
+        var unmatched: [String] = []
+        enforcer.onPickUnmatched = { _, title in unmatched.append(title) }
+        enforcer.lock(rules: [Rule(bundleID: helium, scope: .url, pattern: "github.com")])
+
+        enforcer.allowWindowForSession(bundleID: helium, title: "Gone")
+        await enforcer.sweep()
+        XCTAssertEqual(unmatched, ["gone"])
+
+        fake.states[helium] = [window(2, name: "Gone", urls: ["https://news.example"])]
+        await enforcer.sweep()
+        XCTAssertEqual(fake.navigated.map(\.window), [1, 2], "a later window with that title is steered as usual")
+    }
+
+    func testHoldStopsSteeringWhileThePickIsArmed() async {
+        let fake = FakeBrowserScripting()
+        fake.running = [helium]
+        fake.states[helium] = [window(1, urls: ["https://news.example"])]
+        let enforcer = makeEnforcer(fake)
+        enforcer.lock(rules: [Rule(bundleID: helium, scope: .url, pattern: "github.com")])
+
+        enforcer.hold(true)
+        await enforcer.sweep()
+        XCTAssertTrue(fake.navigated.isEmpty)
+        enforcer.hold(false)
+        await enforcer.sweep()
+        XCTAssertEqual(fake.navigated.count, 1)
+    }
+
     func testAllowForSessionWidensThePatterns() async {
         let fake = FakeBrowserScripting()
         fake.running = [helium]

@@ -18,13 +18,27 @@ final class FakeWindowManager: WindowManaging {
 
     func windows(forPID pid: pid_t) -> [AXWindowSnapshot] { windowsByPID[pid] ?? [] }
 
+    /// Windows that ignore a minimise (a full-screen window). Like the live
+    /// cache: the first attempt is assumed to work, later ones report the
+    /// refusal. The window stays up either way.
+    var refusesMinimise: Set<CGWindowID> = []
+    private var refusalSeen: Set<CGWindowID> = []
+    /// Windows whose minimise now works but is still reported refused, as
+    /// the live cache does until it sees a success.
+    var reportRefusalFor: Set<CGWindowID> = []
+
     func setMinimized(_ minimized: Bool, windowID: CGWindowID, pid: pid_t) -> Bool {
         guard var list = windowsByPID[pid], let index = list.firstIndex(where: { $0.id == windowID }) else { return false }
+        if minimized, refusesMinimise.contains(windowID) {
+            calls.append((windowID, minimized))
+            return refusalSeen.insert(windowID).inserted
+        }
+        let reported = !(minimized && reportRefusalFor.contains(windowID))
         let old = list[index]
         list[index] = AXWindowSnapshot(id: old.id, title: old.title, isMinimized: minimized, isStandard: old.isStandard)
         windowsByPID[pid] = list
         calls.append((windowID, minimized))
-        return true
+        return reported
     }
 
     func observe(pid: pid_t, onChange: @escaping @MainActor () -> Void) { observed.insert(pid) }
@@ -35,6 +49,8 @@ final class FakeWindowManager: WindowManaging {
     var drained = 0
     func forget(pid: pid_t) { forgotten.append(pid) }
     func drainWrites(timeout: TimeInterval) { drained += 1 }
+    var invalidations = 0
+    func invalidateSnapshots() { invalidations += 1 }
 
     // MARK: Helpers
 
@@ -278,6 +294,98 @@ final class WindowEnforcerTests: XCTestCase {
         }
         enforcer.unlock()
         XCTAssertEqual(fake.restored, [2])
+    }
+
+    /// A window that ignores the minimise reads as up on every fresh read;
+    /// re-sending from those reads would loop without pause. Only the timed
+    /// sweep retries it.
+    func testAWindowThatRefusesToMinimiseIsRetriedOnlyByTheTimedSweep() {
+        let fake = xcodeWorld()
+        fake.refusesMinimise = [2]
+        let enforcer = makeEnforcer(fake)
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        XCTAssertEqual(fake.minimised, [2])
+
+        fake.onWindowsChanged?(10)
+        fake.onWindowsChanged?(10)
+        XCTAssertEqual(fake.minimised, [2], "fresh reads do not re-send")
+
+        enforcer.sweepAll()
+        XCTAssertEqual(fake.minimised, [2, 2], "the timed sweep does")
+    }
+
+    /// A window refused in one session may minimise in the next (the user
+    /// left full screen) while the cache still reports the old refusal. It
+    /// must still be restored when that session ends.
+    func testAWindowWhoseMinimiseWasReportedRefusedIsStillRestored() {
+        let fake = xcodeWorld()
+        fake.refusesMinimise = [2]
+        let enforcer = makeEnforcer(fake)
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        enforcer.unlock()
+
+        // Next session: the app now takes the minimise, but the manager
+        // still reports the earlier refusal.
+        fake.refusesMinimise = []
+        fake.reportRefusalFor = [2]
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        XCTAssertTrue(fake.isMinimized(2, pid: 10))
+        enforcer.unlock()
+        XCTAssertFalse(fake.isMinimized(2, pid: 10), "restored although the minimise was reported refused")
+    }
+
+    func testARetriedMinimiseRaisesNoNewNotice() {
+        let fake = xcodeWorld()
+        fake.refusesMinimise = [2]
+        let enforcer = makeEnforcer(fake)
+        var notices = 0
+        enforcer.onBlockedWindow = { _, _, _ in notices += 1 }
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        for _ in 0..<3 {
+            now = now.addingTimeInterval(NoticeThrottle.interval + 1)
+            enforcer.sweepAll()
+        }
+        XCTAssertEqual(notices, 1, "a refused window is retried without a notice every few seconds")
+    }
+
+    /// A picked untitled window stays up past the untitled grace.
+    func testAWindowAllowedByIDStaysUp() {
+        let fake = xcodeWorld()
+        fake.addWindow(7, pid: 10, title: "")
+        let enforcer = makeEnforcer(fake)
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        now = now.addingTimeInterval(WindowEnforcer.untitledGrace + 0.1)
+        enforcer.sweepAll()
+        XCTAssertTrue(fake.isMinimized(7, pid: 10))
+
+        enforcer.allowWindowForSession(bundleID: xcode, windowID: 7)
+        XCTAssertFalse(fake.isMinimized(7, pid: 10), "the pick brings it back")
+        now = now.addingTimeInterval(10)
+        enforcer.sweepAll()
+        XCTAssertFalse(fake.isMinimized(7, pid: 10), "and it stays for the session")
+    }
+
+    /// Each session starts from fresh reads, not what was cached during or
+    /// after the last one; a relock within a session keeps them.
+    func testANewSessionDropsWindowsReadBeforeIt() {
+        let fake = xcodeWorld()
+        let enforcer = makeEnforcer(fake)
+        let rules = [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")]
+        enforcer.lock(rules: rules)
+        XCTAssertEqual(fake.invalidations, 1)
+        enforcer.lock(rules: rules + [Rule(bundleID: xcode, scope: .window, pattern: "Other")])
+        XCTAssertEqual(fake.invalidations, 1, "a relock mid-session is the same session")
+        enforcer.unlock()
+        enforcer.lock(rules: rules)
+        XCTAssertEqual(fake.invalidations, 2)
+    }
+
+    /// Registration is retried only when the app did not answer in time.
+    func testOnlyATimedOutRegistrationIsRetried() {
+        XCTAssertTrue(AccessibilityWindowManager.shouldRetryRegistration(.cannotComplete))
+        for status: AXError in [.success, .notificationAlreadyRegistered, .notificationUnsupported, .notImplemented, .invalidUIElement] {
+            XCTAssertFalse(AccessibilityWindowManager.shouldRetryRegistration(status), "\(status.rawValue)")
+        }
     }
 
     func testDrainReachesTheManager() {

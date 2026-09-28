@@ -27,7 +27,12 @@ enum OSAScript {
                 return String(data: data, encoding: .utf8)
             }.value
         } onCancel: {
-            process.terminate()
+            // SIGKILL, not terminate()'s SIGTERM: ignored signals survive
+            // exec, so the child may ignore TERM like the app does
+            // (TerminationSignals). osascript has nothing to clean up.
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
         }
     }
 

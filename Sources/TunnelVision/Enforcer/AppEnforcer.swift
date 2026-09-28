@@ -355,10 +355,18 @@ final class AppEnforcer: LockListener {
     /// app to click its window, so nothing is hidden until the hold ends.
     private(set) var isHeld = false
 
+    /// A stopped app cannot be brought up or answer the click's hit test,
+    /// so frozen victims are let go (still hidden) while the pick is armed;
+    /// releasing the hold freezes again whatever was not picked.
     func hold(_ on: Bool) {
         guard on != isHeld else { return }
         isHeld = on
-        if !on, isLocking {
+        if on {
+            // Freezes still waiting on their hide are dropped too; the
+            // release re-enforces whatever was not picked.
+            pendingFreezes = []
+            thawFrozen()
+        } else if isLocking {
             enforceRunningApplications()
         }
     }
@@ -443,7 +451,7 @@ final class AppEnforcer: LockListener {
     /// SIGCONT to a running process is a no-op.
     func completeFreeze(pid: pid_t) {
         pendingFreezes.remove(pid)
-        guard isLocking, mode == .frozen, hiddenPIDs.contains(pid), !frozenPIDs.contains(pid),
+        guard isLocking, !isHeld, mode == .frozen, hiddenPIDs.contains(pid), !frozenPIDs.contains(pid),
               process.isRunning(pid: pid) else { return }
         guard let bundle = process.bundleID(of: pid), !allowed.contains(bundle) else { return }
         frozenPIDs.insert(pid)
@@ -523,7 +531,7 @@ final class AppEnforcer: LockListener {
     /// as intended. True when a hide was re-sent (internal so tests can drive it).
     @discardableResult
     func reassertHidden(pid: pid_t) -> Bool {
-        guard isLocking, mode == .dark, hiddenPIDs.contains(pid), process.isRunning(pid: pid) else { return false }
+        guard isLocking, !isHeld, mode == .dark, hiddenPIDs.contains(pid), process.isRunning(pid: pid) else { return false }
         guard let bundle = process.bundleID(of: pid), !allowed.contains(bundle) else { return false }
         guard !process.isHidden(pid: pid) else { return false }
         process.hide(pid: pid)

@@ -9,6 +9,8 @@ final class SlowAXBackend: AXWindowBackend, @unchecked Sendable {
     private var _answers: [[AXWindowSnapshot]?] = []
     private var _reads = 0
     private var _writes: [(id: CGWindowID, minimized: Bool)] = []
+    /// Windows whose minimise the app refuses (full screen).
+    var refusesMinimise: Set<CGWindowID> = []
     let readDelay: TimeInterval
     let writeDelay: TimeInterval
 
@@ -36,8 +38,19 @@ final class SlowAXBackend: AXWindowBackend, @unchecked Sendable {
 
     func setMinimized(_ minimized: Bool, windowID: CGWindowID, pid: pid_t) -> Bool {
         Thread.sleep(forTimeInterval: writeDelay)
-        lock.withLock { _writes.append((windowID, minimized)) }
-        return true
+        return lock.withLock {
+            _writes.append((windowID, minimized))
+            if minimized, refusesMinimise.contains(windowID) { return false }
+            // Later answers show the write, like a real app would.
+            _answers = _answers.map { answer in
+                answer?.map { window in
+                    window.id == windowID
+                        ? AXWindowSnapshot(id: window.id, title: window.title, isMinimized: minimized, isStandard: window.isStandard)
+                        : window
+                }
+            }
+            return true
+        }
     }
 }
 
@@ -138,6 +151,84 @@ final class AXWindowCacheTests: XCTestCase {
 
         cache.setMinimized(true, windowID: 7, pid: pid)
         XCTAssertEqual(cache.windows(forPID: pid).first?.isMinimized, true, "the next sweep does not minimise it twice")
+    }
+
+    /// A sweep reads, then minimises: the read sits ahead of the write in
+    /// the app's queue and answers with the window still up. That answer
+    /// must not undo the write and set off a second minimise.
+    func testAReadQueuedBeforeAWriteDoesNotUndoIt() async {
+        let backend = SlowAXBackend(readDelay: 0.05)
+        backend.answer([window])
+        let cache = AXWindowCache(backend: backend)
+        var changes = 0
+        cache.onChanged = { _ in changes += 1 }
+        cache.refresh(pid: pid)
+        await waitUntil { changes == 1 }
+
+        _ = cache.windows(forPID: pid)
+        cache.setMinimized(true, windowID: 7, pid: pid)
+        await waitUntil { backend.reads >= 3 }
+        try? await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertEqual(cache.windows(forPID: pid).first?.isMinimized, true)
+        XCTAssertEqual(changes, 1, "the stale answer is dropped, not reported as a change")
+        XCTAssertEqual(backend.writes.count, 1)
+    }
+
+    /// A refused minimise (full-screen window) makes the next attempt
+    /// report false, as the synchronous call did: the enforcer then retries
+    /// quietly instead of announcing a minimise that never happens.
+    func testARefusedMinimiseIsReportedOnTheNextAttempt() async {
+        let backend = SlowAXBackend()
+        backend.refusesMinimise = [7]
+        backend.answer([window])
+        let cache = AXWindowCache(backend: backend)
+        var changes = 0
+        cache.onChanged = { _ in changes += 1 }
+        cache.refresh(pid: pid)
+        await waitUntil { changes == 1 }
+
+        XCTAssertTrue(cache.setMinimized(true, windowID: 7, pid: pid), "unknown yet: assumed to work")
+        XCTAssertTrue(cache.drain(timeout: 2))
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(cache.setMinimized(true, windowID: 7, pid: pid))
+        XCTAssertEqual(cache.windows(forPID: pid).first?.isMinimized, false, "the cache does not claim it minimised")
+        XCTAssertTrue(cache.drain(timeout: 2))
+        XCTAssertEqual(backend.writes.count, 2, "the attempt is still sent")
+    }
+
+    /// Between sessions the user minimises or closes windows; the next
+    /// session's first sweep must not act on the old reading.
+    func testInvalidatedSnapshotsAreNotServed() async {
+        let backend = SlowAXBackend()
+        backend.answer([window])
+        let cache = AXWindowCache(backend: backend)
+        var changes = 0
+        cache.onChanged = { _ in changes += 1 }
+        cache.refresh(pid: pid)
+        await waitUntil { changes == 1 }
+
+        cache.invalidateSnapshots()
+        XCTAssertEqual(cache.windows(forPID: pid), [], "nothing to act on until a fresh read lands")
+        await waitUntil { changes == 2 }
+        XCTAssertEqual(cache.windows(forPID: pid), [window])
+    }
+
+    /// A read queued before the new session answers for the old one; it is
+    /// dropped and read again, not served.
+    func testAReadInFlightAcrossInvalidationIsReadAgain() async {
+        let backend = SlowAXBackend(readDelay: 0.1)
+        let minimised = AXWindowSnapshot(id: 7, title: "Notes", isMinimized: true, isStandard: true)
+        backend.answer([window], [minimised])
+        let cache = AXWindowCache(backend: backend)
+        var seen: [[AXWindowSnapshot]] = []
+        cache.onChanged = { [weak cache] pid in seen.append(cache?.windows(forPID: pid) ?? []) }
+
+        cache.refresh(pid: pid)
+        cache.invalidateSnapshots()
+        await waitUntil { !seen.isEmpty }
+        XCTAssertEqual(seen.first, [minimised], "only the read made after the new session began is used")
+        XCTAssertEqual(backend.reads, 2)
     }
 
     /// Quit and signal exits wait for the restores, or the process would

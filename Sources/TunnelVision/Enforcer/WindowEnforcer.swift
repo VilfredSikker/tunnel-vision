@@ -76,13 +76,15 @@ protocol WindowManaging: AnyObject {
     /// Waits for queued minimise and restore requests, up to the timeout.
     /// Exit only.
     func drainWrites(timeout: TimeInterval)
+    /// A session starts: forget windows read before it.
+    func invalidateSnapshots()
 }
 
 /// The live window layer. Reads and writes go through `AXWindowCache`, off
 /// the main thread; only the observers live on the main run loop.
 @MainActor
 final class AccessibilityWindowManager: WindowManaging {
-    private static let log = Logger(subsystem: "com.tunnelvision.timer", category: "ax")
+    nonisolated private static let log = Logger(subsystem: "com.tunnelvision.timer", category: "ax")
     private static let notifications: [String] = [
         kAXWindowCreatedNotification,
         kAXFocusedWindowChangedNotification,
@@ -90,6 +92,14 @@ final class AccessibilityWindowManager: WindowManaging {
         kAXWindowDeminiaturizedNotification,
         kAXTitleChangedNotification,
     ]
+
+    nonisolated private static let registrationAttempts = 3
+
+    /// Only an app that did not answer in time is asked again; an app that
+    /// does not support a notification will not start to on a retry.
+    nonisolated static func shouldRetryRegistration(_ status: AXError) -> Bool {
+        status == .cannotComplete
+    }
 
     private let processes = WorkspaceProcessManager()
     private let cache: AXWindowCache
@@ -123,6 +133,10 @@ final class AccessibilityWindowManager: WindowManaging {
         cache.forget(pid: pid)
     }
 
+    func invalidateSnapshots() {
+        cache.invalidateSnapshots()
+    }
+
     func drainWrites(timeout: TimeInterval) {
         if !cache.drain(timeout: timeout) {
             Self.log.info("window restores still pending after \(timeout)s")
@@ -146,37 +160,78 @@ final class AccessibilityWindowManager: WindowManaging {
             Self.log.info("AX observer for pid \(pid) not created: \(status.rawValue)")
             return
         }
-        // Registering talks to the app too; a busy one gets the same short
-        // timeout as the reads instead of the default six seconds.
-        let application = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(application, LiveAXWindowBackend.timeout)
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
-        for name in Self.notifications {
-            AXObserverAddNotification(observer, application, name as CFString, refcon)
-        }
+        // The source joins the main run loop here; registering for each
+        // notification talks to the app, so a busy one would hold the main
+        // thread. That part runs on the app's queue, with the short timeout.
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
         observers[pid] = observer
+        let box = ObserverBox(observer: observer)
+        let refcon = UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque())
+        let names = Self.notifications
+        cache.performRegistration(pid: pid) {
+            let application = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(application, LiveAXWindowBackend.timeout)
+            for name in names {
+                // A freshly launched app often does not answer yet; the
+                // observer is registered once per session, so a lost
+                // registration would leave only the timed sweep. A few
+                // tries, spaced out, on the registration queue, which the
+                // app's reads and writes do not wait on.
+                for attempt in 0..<Self.registrationAttempts {
+                    let status = AXObserverAddNotification(
+                        box.observer, application, name as CFString, UnsafeMutableRawPointer(bitPattern: refcon)
+                    )
+                    guard Self.shouldRetryRegistration(status) else {
+                        if status != .success && status != .notificationAlreadyRegistered {
+                            Self.log.info("AX notification \(name, privacy: .public) for pid \(pid) not supported: \(status.rawValue)")
+                        }
+                        break
+                    }
+                    if attempt == Self.registrationAttempts - 1 {
+                        Self.log.info("AX notification \(name, privacy: .public) for pid \(pid) not registered: \(status.rawValue)")
+                    } else {
+                        Thread.sleep(forTimeInterval: 0.5)
+                    }
+                }
+            }
+        }
     }
 
     func stopObserving(pid: pid_t) {
         callbacks[pid] = nil
         guard let observer = observers.removeValue(forKey: pid) else { return }
-        let application = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(application, LiveAXWindowBackend.timeout)
-        for name in Self.notifications {
-            AXObserverRemoveNotification(observer, application, name as CFString)
-        }
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        let box = ObserverBox(observer: observer)
+        let names = Self.notifications
+        cache.performRegistration(pid: pid) {
+            let application = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(application, LiveAXWindowBackend.timeout)
+            for name in names {
+                AXObserverRemoveNotification(box.observer, application, name as CFString)
+            }
+        }
     }
 
+    /// The notification says the windows changed, so the cache is out of
+    /// date. The callback's sweep reads through `windows(forPID:)`, which
+    /// schedules the fresh read; refreshing here as well would queue a
+    /// second one behind it.
     private func fire(pid: pid_t) {
-        // The notification says the windows changed; the cached ones are
-        // already out of date.
-        cache.refresh(pid: pid)
-        callbacks[pid]?()
+        if let callback = callbacks[pid] {
+            callback()
+        } else {
+            cache.refresh(pid: pid)
+        }
     }
 }
 
+/// Carries an observer to the app's queue for registration. Registration
+/// runs there and the callbacks on the main run loop; Apple does not
+/// document AXObserver as thread-safe, but only the registration calls
+/// touch it off main, and always on the one serial queue per app.
+private struct ObserverBox: @unchecked Sendable {
+    let observer: AXObserver
+}
 
 // MARK: - Enforcer
 
@@ -212,7 +267,7 @@ final class WindowEnforcer: LockListener {
     /// Window rules of a running session that wait for Accessibility.
     private var pendingRules: [Rule]?
     private var trustTask: Task<Void, Never>?
-    private var warning: String?
+    private var warning = WarningLatch()
 
     static let untrustedWarning = "Window rules are off: grant Tunnel Vision Accessibility in System Settings → Privacy & Security. Until then those apps are allowed whole."
 
@@ -279,6 +334,12 @@ final class WindowEnforcer: LockListener {
                 restore(pid: app.pid)
             }
         }
+        if !isActive {
+            // A new session: windows read before it are out of date, and
+            // acting on them would minimise what the user already hid or
+            // announce windows that are gone. Fresh reads re-judge each app.
+            windows.invalidateSnapshots()
+        }
         patterns = next
         isActive = true
         Self.log.info("window lock: \(next.count) app(s) by window title")
@@ -330,6 +391,20 @@ final class WindowEnforcer: LockListener {
         }
     }
 
+    /// The window pick on an untitled window: no title to match, so that
+    /// one window is admitted by id for the session.
+    func allowWindowForSession(bundleID: String, windowID: CGWindowID) {
+        guard isActive else { return }
+        allowedWindowIDs[bundleID, default: []].insert(windowID)
+        untitledSince[windowID] = nil
+        for app in windows.runningApplications() where app.bundleID == bundleID {
+            if minimizedByUs[app.pid]?.remove(windowID) != nil {
+                windows.setMinimized(false, windowID: windowID, pid: app.pid)
+            }
+        }
+        Self.log.info("allow-for-session: \(bundleID, privacy: .public) window id \(windowID)")
+    }
+
     // MARK: Sweeps
 
     /// Judges every window of every disciplined app that is running.
@@ -359,7 +434,11 @@ final class WindowEnforcer: LockListener {
 
     /// One app: windows that matched (now or earlier this session) stay,
     /// the rest are minimised.
-    func sweep(_ app: ProcessSnapshot) {
+    /// - Parameter retryMinimised: minimise again a window this layer
+    ///   already minimised that reads as up. Off for sweeps triggered by a
+    ///   fresh read, so a window that refuses to minimise (full screen)
+    ///   cannot turn read and write into a loop; the timed sweep retries.
+    func sweep(_ app: ProcessSnapshot, retryMinimised: Bool = true) {
         guard isActive, !isHeld, let bundle = app.bundleID, let active = activePatterns(for: bundle) else { return }
         var allowed = allowedWindowIDs[bundle] ?? []
         for window in windows.windows(forPID: app.pid) where window.isStandard {
@@ -376,13 +455,19 @@ final class WindowEnforcer: LockListener {
                 continue
             }
             if window.isMinimized { continue }
+            if !retryMinimised, minimizedByUs[app.pid]?.contains(window.id) == true { continue }
             if title.isEmpty {
                 let since = untitledSince[window.id] ?? clock()
                 untitledSince[window.id] = since
                 if clock().timeIntervalSince(since) < Self.untitledGrace { continue }
             }
-            if windows.setMinimized(true, windowID: window.id, pid: app.pid) {
-                minimizedByUs[app.pid, default: []].insert(window.id)
+            // Tracked even when the app is known to refuse (full screen): the
+            // attempt may land later, and whatever this layer tried to
+            // minimise gets its restore. Only an attempt expected to work is
+            // announced.
+            let expected = windows.setMinimized(true, windowID: window.id, pid: app.pid)
+            minimizedByUs[app.pid, default: []].insert(window.id)
+            if expected {
                 Self.log.info("minimised \(app.name, privacy: .public) window “\(title, privacy: .public)”")
                 notifyBlocked(app, title: title)
             }
@@ -439,9 +524,9 @@ final class WindowEnforcer: LockListener {
     }
 
     private func report(_ message: String?) {
-        guard message != warning else { return }
-        warning = message
-        onWarning?(message)
+        if warning.update(message) {
+            onWarning?(message)
+        }
     }
 
     private func startTrustPoll() {
@@ -541,7 +626,7 @@ final class WindowEnforcer: LockListener {
     /// Internal so tests can drive it.
     func windowsChanged(pid: pid_t) {
         guard isActive, let app = windows.runningApplications().first(where: { $0.pid == pid }) else { return }
-        sweep(app)
+        sweep(app, retryMinimised: false)
     }
 
     /// Exit only: waits for the restores `unlock` queued.

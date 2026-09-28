@@ -73,6 +73,28 @@ enum BrowserLockPolicy {
         return sets.filter { !$0.value.urlPatterns.isEmpty }
     }
 
+    /// The window a picked title names. The title was read through
+    /// Accessibility and the window names through scripting; a browser may
+    /// add its own name to one of them ("Docs - Google Chrome"), so a
+    /// title that starts the other counts when no window matches exactly.
+    static func window(titled title: String, in windows: [BrowserWindowState]) -> BrowserWindowState? {
+        let wanted = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !wanted.isEmpty else { return nil }
+        func name(_ window: BrowserWindowState) -> String {
+            window.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        if let exact = windows.first(where: { name($0) == wanted }) { return exact }
+        // Of the windows that share a start with the title, the closest in
+        // length: "YouTube - Talk" over "YouTube" for "YouTube - Talk - Google
+        // Chrome", so a distracting window is not the one let through.
+        return windows
+            .filter { window in
+                let candidate = name(window)
+                return !candidate.isEmpty && (wanted.hasPrefix(candidate) || candidate.hasPrefix(wanted))
+            }
+            .min { abs(name($0).count - wanted.count) < abs(name($1).count - wanted.count) }
+    }
+
     /// The window's active page is allowed, or is no web page at all (new
     /// tab page, settings, blank), or the window's title matches a rule.
     static func isCompliant(_ window: BrowserWindowState, ruleSet: BrowserRuleSet) -> Bool {
@@ -269,7 +291,20 @@ final class BrowserEnforcer: LockListener {
     /// Browsers whose site rules cannot be enforced (a message), or all
     /// enforced again (nil). Called on changes only.
     var onWarning: ((String?) -> Void)?
-    private var warning: String?
+    private var warning = WarningLatch()
+    /// Titles of windows the pick allowed, per browser, lowercased, until
+    /// the next sweep finds the window and records its id.
+    private var pickedTitles: [String: [String]] = [:]
+    /// Windows the pick allowed, by the browser's own window id: they keep
+    /// whatever they show as the user navigates and the title changes.
+    private var pickedWindowIDs: [String: Set<Int>] = [:]
+    /// Set while the window pick is armed: no window is steered, so the
+    /// one the user is about to click stays where it is.
+    private(set) var isHeld = false
+
+    func hold(_ on: Bool) {
+        isHeld = on
+    }
 
     init(
         scripting: BrowserScripting = AppleScriptBrowserScripting(),
@@ -301,6 +336,8 @@ final class BrowserEnforcer: LockListener {
         }
         for bundle in ruleSets.keys where next[bundle] == nil {
             sessionSites[bundle] = nil
+            pickedTitles[bundle] = nil
+            pickedWindowIDs[bundle] = nil
             lastAllowedURL[bundle] = nil
         }
         ruleSets = next
@@ -323,6 +360,9 @@ final class BrowserEnforcer: LockListener {
         pollTask = nil
         ruleSets = [:]
         sessionSites = [:]
+        pickedTitles = [:]
+        pickedWindowIDs = [:]
+        isHeld = false
         lastAllowedURL = [:]
         noticeThrottle.reset()
         unansweredBundles = []
@@ -337,9 +377,44 @@ final class BrowserEnforcer: LockListener {
             let names = unansweredBundles.sorted().map(scripting.displayName(of:)).joined(separator: ", ")
             message = "Site rules are off in \(names): it does not answer Tunnel Vision. Allow it under System Settings → Privacy & Security → Automation."
         }
-        guard message != warning else { return }
-        warning = message
-        onWarning?(message)
+        if warning.update(message) {
+            onWarning?(message)
+        }
+    }
+
+    /// True when this browser's windows are steered by site rules now.
+    func governs(bundleID: String) -> Bool {
+        ruleSets[bundleID] != nil
+    }
+
+    /// The window pick on a browser window: the window with this title is
+    /// found on the next sweep and stays on whatever site it shows until
+    /// the session ends, whatever its title becomes.
+    func allowWindowForSession(bundleID: String, title: String) {
+        let pattern = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard isActive, !pattern.isEmpty else { return }
+        pickedTitles[bundleID, default: []].append(pattern)
+        Self.log.info("allow-for-session: \(bundleID, privacy: .public) window “\(pattern, privacy: .public)”")
+    }
+
+    /// A pick that matched no window of the browser on the next sweep:
+    /// (browser name, the picked title). The window is not allowed.
+    var onPickUnmatched: ((_ appName: String, _ title: String) -> Void)?
+
+    /// The first answered sweep after a pick turns each picked title into
+    /// that window's id, from then on independent of the title. A title
+    /// that matches nothing is dropped then, so it cannot catch another
+    /// window with the same title later.
+    private func claimPickedWindows(_ windows: [BrowserWindowState], bundle: String) {
+        guard let titles = pickedTitles.removeValue(forKey: bundle), !titles.isEmpty else { return }
+        for title in titles {
+            if let window = BrowserLockPolicy.window(titled: title, in: windows) {
+                pickedWindowIDs[bundle, default: []].insert(window.id)
+            } else {
+                Self.log.info("\(bundle, privacy: .public): picked window “\(title, privacy: .public)” not found")
+                onPickUnmatched?(scripting.displayName(of: bundle), title)
+            }
+        }
     }
 
     /// "Allow for this session" from the notice: the site joins the
@@ -362,25 +437,26 @@ final class BrowserEnforcer: LockListener {
 
     /// One pass over every managed browser that is running.
     func sweep() async {
-        guard isActive else { return }
+        guard isActive, !isHeld else { return }
         let current = generation
         for bundle in ruleSets.keys.sorted() where scripting.isRunning(bundle) {
             guard let ruleSet = effectiveRuleSet(for: bundle) else { continue }
             guard let windows = await scripting.windows(of: bundle) else {
-                guard isActive, generation == current else { return }
+                guard isActive, !isHeld, generation == current else { return }
                 if unansweredBundles.insert(bundle).inserted {
                     Self.log.info("\(bundle, privacy: .public) did not answer — Automation declined, or the browser is busy")
                     reportUnanswered()
                 }
                 continue
             }
-            guard isActive, generation == current else { return }
+            guard isActive, !isHeld, generation == current else { return }
             if unansweredBundles.remove(bundle) != nil {
                 reportUnanswered()
             }
-            for window in windows {
+            claimPickedWindows(windows, bundle: bundle)
+            for window in windows where pickedWindowIDs[bundle]?.contains(window.id) != true {
                 await judge(window, bundle: bundle, ruleSet: ruleSet)
-                guard isActive, generation == current else { return }
+                guard isActive, !isHeld, generation == current else { return }
             }
         }
     }

@@ -342,6 +342,54 @@ final class EnforcerTests: XCTestCase {
         enforcer.unlock()
     }
 
+    /// Frozen apps are stopped: they cannot be brought up to click on. The
+    /// hold lets them run; releasing it freezes again.
+    func testHoldThawsFrozenAppsAndReleaseFreezesThemAgain() {
+        let fake = FakeProcessManager()
+        fake.launch(bundleID: slackID, name: "Slack", pid: 102)
+        let enforcer = AppEnforcer(process: fake, frozenStore: store)
+        enforcer.lock(mode: .frozen, rules: [Rule(bundleID: xcodeID)])
+        XCTAssertEqual(fake.suspended, [102])
+
+        enforcer.hold(true)
+        XCTAssertEqual(fake.resumed, [102])
+        XCTAssertEqual(store.read().map(\.frozen), [false], "the store no longer claims it is stopped")
+
+        fake.suspended = []
+        enforcer.hold(false)
+        XCTAssertEqual(fake.suspended, [102], "not picked, so frozen again")
+        enforcer.unlock()
+    }
+
+    /// A freeze waiting on its hide when the pick arms must not land
+    /// during the hold, or the app the user reaches for is stopped.
+    func testAFreezeInFlightDoesNotLandDuringTheHold() async throws {
+        let fake = FakeProcessManager()
+        fake.launch(bundleID: slackID, name: "Slack", pid: 102)
+        fake.deferHides = [102]
+        let enforcer = AppEnforcer(process: fake, frozenStore: store, freezeHideTimeout: .milliseconds(150))
+        enforcer.lock(mode: .frozen, rules: [Rule(bundleID: xcodeID)])
+
+        enforcer.hold(true)
+        fake.landHide(102)
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertTrue(fake.suspended.isEmpty)
+        enforcer.unlock()
+    }
+
+    /// Dark mode re-checks each hide for a second or so; a recheck during
+    /// the hold would hide the app the user just brought up.
+    func testNoReHideDuringTheHold() {
+        let fake = FakeProcessManager()
+        fake.launch(bundleID: slackID, name: "Slack", pid: 102)
+        let enforcer = AppEnforcer(process: fake, frozenStore: store)
+        enforcer.lock(mode: .dark, rules: [Rule(bundleID: xcodeID)])
+        enforcer.hold(true)
+        fake.surfaced.insert(102) // the user brought it up to click it
+        XCTAssertFalse(enforcer.reassertHidden(pid: 102))
+        enforcer.unlock()
+    }
+
     /// The Dock click on the way to a hidden app must not be taken as the
     /// pick: that would allow the Dock and hide the app again.
     func testPickIgnoresTheDockMenuBarAndClicksOutsideWindows() {
@@ -351,6 +399,22 @@ final class EnforcerTests: XCTestCase {
                        "exempt system apps are never locked, so never picked")
         XCTAssertFalse(PickFilter.accepts(bundleID: "com.example.menubar", isRegularApp: false, hitIsInWindow: true))
         XCTAssertFalse(PickFilter.accepts(bundleID: slackID, isRegularApp: true, hitIsInWindow: false))
+    }
+
+    /// Before: an untitled window or a browser window fell through to the
+    /// app layer, which already allowed the app, and stayed hidden.
+    func testAPickGoesToTheLayerThatWouldHideTheWindow() {
+        func picked(_ title: String, id: CGWindowID? = 9) -> PickedWindow {
+            PickedWindow(pid: 1, bundleID: slackID, appName: "Slack", title: title, windowID: id)
+        }
+        XCTAssertEqual(PickAllowance.resolve(picked(" Notes "), windowLayerJudges: true, browserLayerJudges: false), .windowID(9),
+                       "the clicked window, not every window whose title contains its title")
+        XCTAssertEqual(PickAllowance.resolve(picked(" Notes ", id: nil), windowLayerJudges: true, browserLayerJudges: false), .windowTitle("Notes"))
+        XCTAssertEqual(PickAllowance.resolve(picked(""), windowLayerJudges: true, browserLayerJudges: false), .windowID(9))
+        XCTAssertEqual(PickAllowance.resolve(picked("", id: nil), windowLayerJudges: true, browserLayerJudges: false), .unidentifiable)
+        XCTAssertEqual(PickAllowance.resolve(picked("Docs"), windowLayerJudges: false, browserLayerJudges: true), .browserTitle("Docs"))
+        XCTAssertEqual(PickAllowance.resolve(picked(""), windowLayerJudges: false, browserLayerJudges: true), .unidentifiable)
+        XCTAssertEqual(PickAllowance.resolve(picked("Anything"), windowLayerJudges: false, browserLayerJudges: false), .app)
     }
 
     // MARK: Freeze ordering

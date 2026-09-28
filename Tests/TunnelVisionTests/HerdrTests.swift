@@ -221,8 +221,11 @@ final class HerdrWorkspaceGuardTests: XCTestCase {
         let (guardian, client) = makeGuard(labels: [], focused: nil)
         client.isAvailable = false
         client.snapshotError = HerdrError.disconnected
+        var warnings: [String?] = []
+        guardian.onWarning = { warnings.append($0) }
         guardian.lockStateChanged(active: true, rules: [Rule(bundleID: "", scope: .herdr, pattern: "promodoro-cop")], mode: .dark)
         XCTAssertTrue(guardian.isActive, "herdr starting after the lock is still picked up")
+        XCTAssertEqual(warnings.count, 1, "a missing socket is reported at once, in time for the start confirmation")
         guardian.deactivate()
     }
 

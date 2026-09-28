@@ -23,7 +23,7 @@ final class HerdrWorkspaceGuard: LockListener {
     private var orderedIDs: [String] = []
     private var eventTask: Task<Void, Never>?
     private var noticeThrottle = NoticeThrottle()
-    private var warning: String?
+    private var warning = WarningLatch()
 
     static let unreachableWarning = "herdr workspace rules are off: herdr is not reachable. Tunnel Vision keeps trying while the session runs."
 
@@ -66,10 +66,12 @@ final class HerdrWorkspaceGuard: LockListener {
         deactivate()
         // Locked even without a socket: herdr may start later in the
         // session, and the run loop retries until it answers.
+        setAllowedLabels(labels)
         if !client.isAvailable {
             Self.log.info("herdr socket not present yet — retrying while locked")
+            // Said at once, so the start confirmation can carry it.
+            report(Self.unreachableWarning)
         }
-        setAllowedLabels(labels)
         Self.log.info("locking to herdr workspaces: \(labels.sorted().joined(separator: ", "), privacy: .public)")
         eventTask = Task { [weak self] in
             await self?.run()
@@ -129,9 +131,9 @@ final class HerdrWorkspaceGuard: LockListener {
     }
 
     private func report(_ message: String?) {
-        guard message != warning else { return }
-        warning = message
-        onWarning?(message)
+        if warning.update(message) {
+            onWarning?(message)
+        }
     }
 
     /// Reads the current state and bounces immediately if the user is
