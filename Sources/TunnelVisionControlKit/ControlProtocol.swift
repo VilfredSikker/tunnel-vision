@@ -12,9 +12,7 @@ public enum ControlProtocol {
 
     /// `~/Library/Application Support/TunnelVision/control.sock`.
     public static var defaultSocketPath: String {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return support.appendingPathComponent("TunnelVision", isDirectory: true)
-            .appendingPathComponent(socketFileName).path
+        AppIdentity.supportDirectory.appendingPathComponent(socketFileName).path
     }
 
     public struct Request {
