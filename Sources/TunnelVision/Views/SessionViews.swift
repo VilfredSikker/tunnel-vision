@@ -138,6 +138,12 @@ struct SessionHeader: View {
             }
             .controlSize(.large)
             .tint(Theme.allowed)
+            // Pausing is budgeted per session; once it is spent, the button
+            // stays but cannot pause.
+            .disabled(model.phase == .work && !model.canPause)
+            .help(model.phase == .work && !model.canPause
+                  ? "No pause time left in this session"
+                  : "Pauses lift the lock; \(TimeFormat.minutes(AppState.maxPauseSeconds)) in total per session")
 
             // Enabled for repeats too: Done ends this run with credit, and
             // the task simply stays checked off.

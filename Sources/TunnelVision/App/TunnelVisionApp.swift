@@ -132,7 +132,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         browserEnforcer.onWarning = { [weak model] in model?.setLockWarning($0, layer: "browser") }
         herdrGuard.onWarning = { [weak model] in model?.setLockWarning($0, layer: "herdr") }
 
-        let broadcaster = LockBroadcaster([enforcer, windowEnforcer, browserEnforcer, herdrGuard])
+        // The window pick holds every layer that would hide the window the
+        // user is reaching for, and disarms when the lock lifts.
+        let pick = WindowPickController()
+        pick.onHold = { [weak enforcer, weak windowEnforcer, weak browserEnforcer] on in
+            enforcer?.hold(on)
+            windowEnforcer?.hold(on)
+            browserEnforcer?.hold(on)
+        }
+        pick.onPicked = { [weak self] window in
+            self?.allowPicked(window)
+        }
+        windowPick = pick
+
+        let broadcaster = LockBroadcaster([enforcer, windowEnforcer, browserEnforcer, herdrGuard, pick])
         lockBroadcaster = broadcaster
         model.lockListener = broadcaster
 
@@ -148,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, let task = self.model.activeTask else { return }
             self.toast?.show(
                 title: "Pause over: back to “\(task.title)”",
-                detail: "Pauses end after \(TimeFormat.minutes(AppState.maxPauseSeconds)); the lock is on again.",
+                detail: "This session’s \(TimeFormat.minutes(AppState.maxPauseSeconds)) of pause time is used up; the lock is on again.",
                 symbol: "lock.fill"
             )
         }
@@ -176,16 +189,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         browserEnforcer.onBlockedSite = { [weak notice] appName, bundleID, host in
             notice?.show(.site(appName: appName, bundleID: bundleID, host: host))
         }
-
-        let pick = WindowPickController()
-        pick.onHold = { [weak enforcer, weak windowEnforcer] on in
-            enforcer?.hold(on)
-            windowEnforcer?.hold(on)
+        browserEnforcer.onPickUnmatched = { [weak self] appName, _ in
+            self?.toast?.show(
+                title: "Could not allow that \(appName) window",
+                detail: "Its title changed before Tunnel Vision found it. Press the shortcut and click it again.",
+                symbol: "exclamationmark.triangle.fill"
+            )
         }
-        pick.onPicked = { [weak self] window in
-            self?.allowPicked(window)
-        }
-        windowPick = pick
 
         // The control socket lets tunnelvision-mcp (and anything else local) read
         // and shape tasks, presets and the session.
@@ -224,6 +234,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     title: "Nothing to pick for",
                     detail: "The window pick works while a locked session runs.",
                     symbol: "cursorarrow.click.2"
+                )
+                return
+            }
+            // The click is read through Accessibility; without it the pick
+            // would sit armed and never see a window.
+            guard AccessibilityPermission.isTrusted else {
+                toast?.show(
+                    title: "The window pick needs Accessibility",
+                    detail: "Grant it in Settings → Permissions, then press the shortcut again.",
+                    symbol: "exclamationmark.triangle.fill"
                 )
                 return
             }
@@ -268,25 +288,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// A picked window inside an app judged by window title is allowed by
-    /// its title; anything else is allowed as a whole app.
+    /// The pick goes to the layer that would otherwise hide the window again.
     private func allowPicked(_ window: PickedWindow) {
-        let title = window.title.trimmingCharacters(in: .whitespaces)
-        if let windowEnforcer, windowEnforcer.disciplines(bundleID: window.bundleID), !title.isEmpty {
-            windowEnforcer.allowForSession(bundleID: window.bundleID, titlePattern: title)
-            toast?.show(
-                title: "Allowed for this session",
-                detail: "“\(title)” in \(window.appName)",
-                symbol: "checkmark.circle.fill"
-            )
-        } else {
+        let allowance = PickAllowance.resolve(
+            window,
+            windowLayerJudges: windowEnforcer?.disciplines(bundleID: window.bundleID) ?? false,
+            browserLayerJudges: browserEnforcer?.governs(bundleID: window.bundleID) ?? false
+        )
+        let detail: String
+        switch allowance {
+        case .windowTitle(let title):
+            windowEnforcer?.allowForSession(bundleID: window.bundleID, titlePattern: title)
+            detail = "“\(title)” in \(window.appName)"
+        case .windowID(let id):
+            windowEnforcer?.allowWindowForSession(bundleID: window.bundleID, windowID: id)
+            let title = window.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            detail = title.isEmpty ? "This untitled \(window.appName) window" : "“\(title)” in \(window.appName)"
+        case .browserTitle(let title):
+            browserEnforcer?.allowWindowForSession(bundleID: window.bundleID, title: title)
+            detail = "“\(title)” in \(window.appName), whatever site it shows"
+        case .app:
             enforcer?.allowForSession(bundleID: window.bundleID)
+            detail = "\(window.appName), all windows"
+        case .unidentifiable:
             toast?.show(
-                title: "Allowed for this session",
-                detail: "\(window.appName), all windows",
-                symbol: "checkmark.circle.fill"
+                title: "Could not allow that window",
+                detail: "It has no title Tunnel Vision can match. Try again once it has one.",
+                symbol: "exclamationmark.triangle.fill"
             )
+            return
         }
+        toast?.show(title: "Allowed for this session", detail: detail, symbol: "checkmark.circle.fill")
     }
 
     /// "A short confirmation shows what is now locked" (DESIGN_BRIEF §5).
@@ -295,8 +327,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The lock's first sweep may already have shown a blocked notice in
         // the same spot; the summary covers what it said.
         noticeController?.dismiss()
-        let summary = LockSummary.describe(rules: lock.rules, mode: lock.mode) { bundleID in
+        var summary = LockSummary.describe(rules: lock.rules, mode: lock.mode) { bundleID in
             AppCatalog.displayName(forBundleID: bundleID) ?? bundleID
+        }
+        // A layer that already knows it cannot enforce its part (window
+        // rules without Accessibility) says so here, where the user looks,
+        // rather than only in the panel.
+        for warning in model.lockWarningMessages {
+            summary += "\n⚠︎ " + warning
         }
         toast?.show(title: "Locked to “\(task.title)”", detail: summary, symbol: "lock.fill")
     }
@@ -343,10 +381,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// back and minimised windows return, matching the crash-safe pid store
     /// for the hard-kill case.
     private func releaseLocks() {
-        windowPick?.disarm()
         enforcer?.unlock()
         windowEnforcer?.unlock()
         browserEnforcer?.unlock()
+        // After the unlocks: disarming first would end the hold and run a
+        // full enforcement pass that the unlocks then undo.
+        windowPick?.disarm()
         controlServer?.stop()
         // Window restores go out in the background; the process is about
         // to exit, so wait for them.

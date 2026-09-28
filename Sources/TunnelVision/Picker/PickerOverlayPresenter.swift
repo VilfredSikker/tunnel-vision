@@ -21,7 +21,14 @@ final class PickerOverlayPresenter {
     private var completion: ((Result?) -> Void)?
     private weak var model: AppState?
 
-    var isPresented: Bool { !panels.isEmpty }
+    /// Window titles are being read; the overlay opens when they arrive.
+    private var loading = false
+    /// Numbers each request: a load that finishes after its request was
+    /// cancelled, and another one started, must not open with the old
+    /// request's rules for the new caller.
+    private var request = 0
+
+    var isPresented: Bool { !panels.isEmpty || loading }
 
     /// - Parameters:
     ///   - initialRules: rules the selection starts from (preset rules or task overrides).
@@ -34,14 +41,29 @@ final class PickerOverlayPresenter {
         allowPresetSave: Bool,
         onFinish: @escaping (Result?) -> Void
     ) {
-        guard panels.isEmpty else { return }
-        let screens = NSScreen.screens
-        guard !screens.isEmpty else { return }
-
+        guard !isPresented, !NSScreen.screens.isEmpty else { return }
         self.model = model
         completion = onFinish
+        // Titles come from Accessibility off the main thread; a busy or
+        // frozen app delays the overlay, never the menu bar.
+        loading = true
+        request += 1
+        let thisRequest = request
+        Task { @MainActor [weak self] in
+            let apps = await WindowCatalogue.onScreenAppsLoadingTitles()
+            // Cancelled meanwhile, or superseded by a later request.
+            guard let self, self.loading, self.request == thisRequest else { return }
+            self.loading = false
+            self.show(apps: apps, initialRules: initialRules, mode: mode, allowPresetSave: allowPresetSave)
+        }
+    }
 
-        let apps = WindowCatalogue.onScreenApps()
+    private func show(apps: [PickerAppInfo], initialRules: [Rule], mode: Mode, allowPresetSave: Bool) {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else {
+            finish(with: nil)
+            return
+        }
         let seed = SelectionBuilder.seed(apps: apps, rules: initialRules)
         let overlayModel = PickerOverlayModel(
             apps: apps,
@@ -166,6 +188,8 @@ final class PickerOverlayPresenter {
     // MARK: Internals
 
     private func finish(with result: Result?) {
+        // A cancel while the titles load: the overlay never opens.
+        loading = false
         if let escMonitor {
             NSEvent.removeMonitor(escMonitor)
         }

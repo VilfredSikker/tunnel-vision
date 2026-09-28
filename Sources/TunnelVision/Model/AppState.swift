@@ -17,8 +17,10 @@ enum SessionPhase: Equatable, Sendable {
 enum PhaseAlert: Equatable, Sendable {
     /// Work time ran out; the break has begun.
     case workEnded(taskTitle: String, breakSeconds: TimeInterval)
-    /// The break ran out; nothing is locked until the next start.
-    case breakEnded(nextTaskTitle: String?)
+    /// The break ran out; nothing is locked until the next start. The next
+    /// task is fixed here so the popup starts the task it names, even if
+    /// the list changes while it is up.
+    case breakEnded(nextTaskID: UUID?, nextTaskTitle: String?)
 }
 
 /// Receives session-lock changes so the app enforcer can react without the
@@ -46,7 +48,7 @@ final class AppState {
     /// A session started; the app confirms what is now locked.
     var onSessionStarted: ((TaskItem) -> Void)?
 
-    /// A pause ran into `maxPauseSeconds` and the session resumed by itself.
+    /// A pause used up the session's pause budget and it resumed by itself.
     var onPauseLimitReached: (() -> Void)?
 
     /// What the running task locks to, or nil for an open session (no
@@ -119,8 +121,10 @@ final class AppState {
     private var workEndsAt: Date?
     /// Remaining work seconds captured at pause time.
     private var pausedRemaining: TimeInterval?
-    /// When the current pause began; it ends by itself after `maxPauseSeconds`.
+    /// When the current pause began.
     private var pausedAt: Date?
+    /// Pause time this session has used, the running pause not counted.
+    private var pauseUsed: TimeInterval = 0
     /// Total work seconds of the current run, for ring progress. Grows when
     /// the session is extended.
     private var workTotal: TimeInterval = 0
@@ -560,6 +564,7 @@ final class AppState {
         growth = GrowthPlan(startedAt: clock(), durationSeconds: workTotal)
         growthBaseProgress = 0
         growthBaseElapsed = 0
+        pauseUsed = 0
         phase = .work
         phaseAlert = nil
         rememberPreset(task.presetID)
@@ -588,18 +593,33 @@ final class AppState {
         return url
     }
 
-    /// A pause lifts the lock, so it cannot last forever: after this long
-    /// the session resumes by itself.
+    /// A pause lifts the lock, so pausing is budgeted: this much in total
+    /// per session. A pause that uses up the budget ends by itself, and
+    /// pausing again straight away does not reset it.
     static let maxPauseSeconds: TimeInterval = 5 * 60
+
+    /// Pause time left in this session, the running pause counted.
+    var pauseSecondsLeft: TimeInterval {
+        var used = pauseUsed
+        if phase == .paused, let pausedAt {
+            used += clock().timeIntervalSince(pausedAt)
+        }
+        return max(0, Self.maxPauseSeconds - used)
+    }
+
+    /// The running session can still be paused.
+    var canPause: Bool {
+        phase == .work && pauseSecondsLeft > 0
+    }
 
     /// When the running pause ends by itself (phase == .paused).
     var pauseEndsAt: Date? {
         guard phase == .paused, let pausedAt else { return nil }
-        return pausedAt.addingTimeInterval(Self.maxPauseSeconds)
+        return pausedAt.addingTimeInterval(Self.maxPauseSeconds - pauseUsed)
     }
 
     func pause() {
-        guard phase == .work, let endsAt = workEndsAt else { return }
+        guard canPause, let endsAt = workEndsAt else { return }
         pausedRemaining = max(0, endsAt.timeIntervalSince(clock()))
         pausedAt = clock()
         phase = .paused
@@ -612,6 +632,9 @@ final class AppState {
     func resume() {
         guard phase == .paused, let remaining = pausedRemaining else { return }
         workEndsAt = clock().addingTimeInterval(remaining)
+        if let pausedAt {
+            pauseUsed = min(Self.maxPauseSeconds, pauseUsed + clock().timeIntervalSince(pausedAt))
+        }
         pausedAt = nil
         phase = .work
         persist()
@@ -738,10 +761,10 @@ final class AppState {
             }
         case .breakTime:
             if let endsAt = breakEndsAt, clock() >= endsAt {
-                let next = nextTask?.title
+                let next = nextTask
                 phase = .idle
                 nextTaskID = nil
-                phaseAlert = .breakEnded(nextTaskTitle: next)
+                phaseAlert = .breakEnded(nextTaskID: next?.id, nextTaskTitle: next?.title)
                 persist()
                 if settings.soundOn {
                     SoundPlayer.breakEnd()
@@ -796,6 +819,7 @@ final class AppState {
         workEndsAt = nil
         pausedRemaining = nil
         pausedAt = nil
+        pauseUsed = 0
         workTotal = 0
         growth = nil
         growthBaseProgress = 0

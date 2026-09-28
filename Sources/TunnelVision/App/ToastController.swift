@@ -74,7 +74,7 @@ private struct ToastView: View {
                 Text(detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(3)
+                    .lineLimit(8)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)

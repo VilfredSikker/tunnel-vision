@@ -43,8 +43,14 @@ final class PhaseAlertController {
             onDismiss: { [weak self] in self?.model.dismissPhaseAlert() },
             onSkipBreak: { [weak self] in self?.model.skipBreak() },
             onStartNext: { [weak self] in
-                guard let self, let next = self.model.nextUpTask else { return }
-                self.model.startTask(id: next.id)
+                guard let self, case .breakEnded(let id?, _) = alert else { return }
+                // The task may have been deleted while the popup was up;
+                // then there is nothing to start, and the popup goes.
+                guard self.model.tasks.contains(where: { $0.id == id }) else {
+                    self.model.dismissPhaseAlert()
+                    return
+                }
+                self.model.startTask(id: id)
             }
         )
         let hosting = NSHostingView(rootView: view)
@@ -123,7 +129,7 @@ private struct PhaseAlertView: View {
             Button("OK", action: onDismiss)
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
-        case .breakEnded(let next):
+        case .breakEnded(_, let next):
             Button("Later", action: onDismiss)
                 .controlSize(.large)
             if let next {
@@ -154,7 +160,7 @@ private struct PhaseAlertView: View {
         switch alert {
         case .workEnded(_, let seconds):
             "Your \(TimeFormat.minutes(seconds)) break has started. Everything is unlocked."
-        case .breakEnded(let next):
+        case .breakEnded(_, let next):
             next.map { "Next up: \($0)" } ?? "Nothing left on today’s list."
         }
     }

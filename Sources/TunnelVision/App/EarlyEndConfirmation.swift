@@ -15,9 +15,13 @@ enum EarlyEndConfirmation {
         alert.messageText = "End the session early?"
         alert.informativeText = "“\(taskTitle)” stops now and nothing is counted. Consider a break instead."
         alert.alertStyle = .warning
-        alert.addButton(withTitle: action)
+        let end = alert.addButton(withTitle: action)
         alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
+        end.hasDestructiveAction = true
+        // No default button: Cmd-Q followed by a reflexive Return must not
+        // end the session. Ending takes a deliberate click; Esc still
+        // cancels.
+        end.keyEquivalent = ""
         NSApp.activate()
         return alert.runModal() == .alertFirstButtonReturn
     }
@@ -51,11 +55,19 @@ enum EarlyEndConfirmation {
     /// The quit comes from logout, restart or shutdown, which must never be
     /// held up by a dialog.
     static var isSystemQuit: Bool {
-        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+        isSystemQuit(NSAppleEventManager.shared().currentAppleEvent)
+    }
+
+    /// The quit Apple Event carries why the app is asked to quit; logout,
+    /// restart and shutdown set a reason, a Cmd-Q or Quit button does not.
+    static func isSystemQuit(_ event: NSAppleEventDescriptor?) -> Bool {
+        guard let event,
               event.eventClass == kCoreEventClass, event.eventID == kAEQuitApplication,
               let reason = event.attributeDescriptor(forKeyword: kAEQuitReason)?.enumCodeValue else { return false }
-        return [kAELogOut, kAEReallyLogOut, kAEShowRestartDialog, kAERestart, kAEShowShutdownDialog, kAEShutDown]
-            .map { OSType($0) }
-            .contains(reason)
+        return systemQuitReasons.contains(reason)
     }
+
+    static let systemQuitReasons: Set<OSType> = Set(
+        [kAELogOut, kAEReallyLogOut, kAEShowRestartDialog, kAERestart, kAEShowShutdownDialog, kAEShutDown].map { OSType($0) }
+    )
 }

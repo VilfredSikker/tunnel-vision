@@ -475,9 +475,9 @@ final class AppStateTests: XCTestCase {
 
         now = now.addingTimeInterval(61)
         state.tick()
-        XCTAssertEqual(state.phaseAlert, .breakEnded(nextTaskTitle: b.title))
+        XCTAssertEqual(state.phaseAlert, .breakEnded(nextTaskID: b.id, nextTaskTitle: b.title))
         state.tick()
-        XCTAssertEqual(state.phaseAlert, .breakEnded(nextTaskTitle: b.title))
+        XCTAssertEqual(state.phaseAlert, .breakEnded(nextTaskID: b.id, nextTaskTitle: b.title))
 
         state.startTask(id: b.id)
         XCTAssertNil(state.phaseAlert, "starting the next task clears the popup")
@@ -546,6 +546,33 @@ final class AppStateTests: XCTestCase {
         state.pause()
         state.resume()
         XCTAssertEqual(limitsReached, 1, "a resume by hand is not announced")
+    }
+
+    /// Before: each pause got a fresh five minutes, so pausing again right
+    /// after the auto-resume kept the lock off for good.
+    func testPauseTimeIsBudgetedPerSession() {
+        let state = makeState()
+        let (a, b) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+
+        state.pause()
+        now = now.addingTimeInterval(3 * 60)
+        state.resume()
+        XCTAssertEqual(state.pauseSecondsLeft, 2 * 60)
+
+        state.pause()
+        XCTAssertEqual(state.pauseEndsAt, now.addingTimeInterval(2 * 60), "the second pause gets what is left")
+        now = now.addingTimeInterval(2 * 60 + 1)
+        state.tick()
+        XCTAssertEqual(state.phase, .work)
+
+        XCTAssertFalse(state.canPause)
+        state.pause()
+        XCTAssertEqual(state.phase, .work, "no pause time left this session")
+
+        state.stopNow()
+        state.startTask(id: b.id)
+        XCTAssertTrue(state.canPause, "the next session starts with a full budget")
     }
 
     // MARK: Preset URLs

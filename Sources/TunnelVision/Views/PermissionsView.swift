@@ -1,6 +1,34 @@
 import AppKit
 import SwiftUI
 
+/// Automation is granted per browser; each has its own answer.
+enum AutomationPermission {
+    enum Status: Equatable {
+        case granted
+        case declined
+        /// macOS will ask the first time Tunnel Vision reads the browser.
+        case notAsked
+        /// The answer can only be read while the browser runs.
+        case notRunning
+    }
+
+    /// Reads the recorded answer without prompting.
+    static func status(bundleID: String) -> Status {
+        let target = NSAppleEventDescriptor(bundleIdentifier: bundleID)
+        guard let desc = target.aeDesc else { return .notAsked }
+        return status(for: AEDeterminePermissionToAutomateTarget(desc, typeWildCard, typeWildCard, false))
+    }
+
+    static func status(for code: OSStatus) -> Status {
+        switch code {
+        case noErr: .granted
+        case OSStatus(errAEEventNotPermitted): .declined
+        case OSStatus(procNotFound): .notRunning
+        default: .notAsked
+        }
+    }
+}
+
 /// The three permissions and what each unlocks (DESIGN_BRIEF §6), with a
 /// live status and a way to grant each. Shared by Settings and onboarding.
 struct PermissionSteps: View {
@@ -15,14 +43,19 @@ struct PermissionSteps: View {
                     detail: "Window rules: inside an app allowed by window, other windows are minimised, and the picker shows window titles. Without it, a window rule allows the whole app.",
                     grant: ("Grant…", { AccessibilityPermission.request() })
                 )
-                step(
-                    title: "Automation, per browser",
-                    granted: nil,
-                    detail: "Site rules: each managed browser asks once, the first time Tunnel Vision reads its tabs. A declined browser is left alone; re-enable it under Automation.",
-                    grant: ("Open Automation…", {
-                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!)
-                    })
-                )
+                VStack(alignment: .leading, spacing: 6) {
+                    step(
+                        title: "Automation, per browser",
+                        granted: nil,
+                        detail: "Site rules: each managed browser asks once, the first time Tunnel Vision reads its tabs. A declined browser is left alone; re-enable it under Automation.",
+                        grant: ("Open Automation…", {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!)
+                        })
+                    )
+                    ForEach(browsers) { browser in
+                        browserRow(browser)
+                    }
+                }
                 step(
                     title: "Screen Recording (optional)",
                     granted: ScreenCapturePermission.isAllowed,
@@ -36,8 +69,31 @@ struct PermissionSteps: View {
         }
     }
 
-    /// `granted` nil: the status cannot be read up front (Automation is
-    /// granted per browser, when it first asks).
+    /// Read once per window: the list changes only when a browser is
+    /// installed or removed.
+    @State private var browsers = Browsers.installed()
+
+    private func browserRow(_ browser: Browsers.Installed) -> some View {
+        let status = AutomationPermission.status(bundleID: browser.bundleID)
+        let (label, symbol, color): (String, String, Color) = switch status {
+        case .granted: ("Allowed", "checkmark.circle.fill", Theme.allowed)
+        case .declined: ("Declined", "xmark.circle.fill", Theme.blocked)
+        case .notAsked: ("Not asked yet", "circle", .secondary)
+        case .notRunning: ("Open it to check", "circle.dashed", .secondary)
+        }
+        return HStack {
+            Text(browser.name)
+                .font(.caption)
+            Spacer()
+            Label(label, systemImage: symbol)
+                .font(.caption)
+                .foregroundStyle(color)
+        }
+        .padding(.leading, 12)
+    }
+
+    /// `granted` nil: no single status (Automation is answered per
+    /// browser; the rows below show each).
     private func step(title: String, granted: Bool?, detail: String, grant: (String, () -> Void)) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {

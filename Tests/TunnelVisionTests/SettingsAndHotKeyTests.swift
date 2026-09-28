@@ -4,6 +4,61 @@ import XCTest
 
 @testable import TunnelVision
 
+/// Quitting and signals: the paths that decide whether frozen apps are let
+/// go and whether macOS can log out.
+@MainActor
+final class QuitPathTests: XCTestCase {
+    private func quitEvent(reason: Int?) -> NSAppleEventDescriptor {
+        let event = NSAppleEventDescriptor.appleEvent(
+            withEventClass: AEEventClass(kCoreEventClass),
+            eventID: AEEventID(kAEQuitApplication),
+            targetDescriptor: nil,
+            returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID)
+        )
+        if let reason {
+            event.setAttribute(NSAppleEventDescriptor(enumCode: OSType(reason)), forKeyword: AEKeyword(kAEQuitReason))
+        }
+        return event
+    }
+
+    /// A wrong reason code would hold logout, restart or shutdown behind the
+    /// end-early dialog.
+    func testLogoutRestartAndShutdownSkipTheQuitGate() {
+        for reason in [kAELogOut, kAEReallyLogOut, kAEShowRestartDialog, kAERestart, kAEShowShutdownDialog, kAEShutDown] {
+            XCTAssertTrue(EarlyEndConfirmation.isSystemQuit(quitEvent(reason: Int(reason))), "reason \(reason)")
+        }
+    }
+
+    func testAPlainQuitGoesThroughTheGate() {
+        XCTAssertFalse(EarlyEndConfirmation.isSystemQuit(nil), "Cmd-Q and the Quit button send no Apple Event")
+        XCTAssertFalse(EarlyEndConfirmation.isSystemQuit(quitEvent(reason: nil)), "an AppleScript quit has no reason")
+        let open = NSAppleEventDescriptor.appleEvent(
+            withEventClass: AEEventClass(kCoreEventClass),
+            eventID: AEEventID(kAEOpenApplication),
+            targetDescriptor: nil,
+            returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID)
+        )
+        open.setAttribute(NSAppleEventDescriptor(enumCode: OSType(kAELogOut)), forKeyword: AEKeyword(kAEQuitReason))
+        XCTAssertFalse(EarlyEndConfirmation.isSystemQuit(open), "only a quit event counts")
+    }
+
+    /// The handler runs on the main queue and the process survives the
+    /// signal: the default action is off before the source exists.
+    func testASignalRunsTheHandlerInsteadOfKillingTheProcess() async {
+        let signals = TerminationSignals()
+        var received: [Int32] = []
+        signals.install(signals: [SIGUSR2]) { received.append($0) }
+        kill(getpid(), SIGUSR2)
+        let deadline = Date().addingTimeInterval(2)
+        while received.isEmpty, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(received, [SIGUSR2])
+    }
+}
+
 final class SettingsAndHotKeyTests: XCTestCase {
     /// Before: every focus snapped the window to the center. Now only a
     /// frame stranded off every display is moved.
@@ -18,6 +73,13 @@ final class SettingsAndHotKeyTests: XCTestCase {
         XCTAssertTrue(SettingsWindowPlacement.needsRecentering(
             frame: CGRect(x: 5000, y: 720, width: 440, height: 450), visibleFrames: screens
         ), "left on an unplugged display")
+    }
+
+    func testAutomationAnswersMapToAStatusPerBrowser() {
+        XCTAssertEqual(AutomationPermission.status(for: noErr), .granted)
+        XCTAssertEqual(AutomationPermission.status(for: OSStatus(errAEEventNotPermitted)), .declined)
+        XCTAssertEqual(AutomationPermission.status(for: OSStatus(errAEEventWouldRequireUserConsent)), .notAsked)
+        XCTAssertEqual(AutomationPermission.status(for: OSStatus(procNotFound)), .notRunning)
     }
 
     func testSettingsDecodeFromArchiveWithoutNewKeys() throws {
