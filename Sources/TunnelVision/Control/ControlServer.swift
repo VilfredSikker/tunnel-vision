@@ -15,7 +15,17 @@ final class ControlServer {
     private struct Client {
         var buffer = Data()
         var source: DispatchSourceRead
+        /// Answer bytes the socket did not take yet; sent when it can.
+        var pending = Data()
+        var writeSource: DispatchSourceWrite?
+        /// The client closed its side after its requests; the connection
+        /// ends once `pending` is out. The read source is suspended so the
+        /// end-of-file does not fire again meanwhile.
+        var closing = false
     }
+
+    /// A client more than this far behind on reading its answers is dropped.
+    private static let maxPendingBytes = 16 << 20
 
     let path: String
     private let handler: Handler
@@ -74,10 +84,9 @@ final class ControlServer {
         close(listenFD)
         listenFD = -1
         unlink(path)
-        for client in clients.values {
-            client.source.cancel()
+        for fd in Array(clients.keys) {
+            drop(fd)
         }
-        clients = [:]
     }
 
     // MARK: Connections
@@ -106,6 +115,13 @@ final class ControlServer {
         var chunk = [UInt8](repeating: 0, count: 65536)
         let count = Darwin.read(fd, &chunk, chunk.count)
         if count < 0, errno == EAGAIN || errno == EINTR { return }
+        if count == 0, let client = clients[fd], !client.pending.isEmpty, !client.closing {
+            // A half-close after the request (`nc -N`, most scripts): the
+            // answer still goes out, then the connection ends.
+            clients[fd]?.closing = true
+            client.source.suspend()
+            return
+        }
         guard count > 0 else {
             drop(fd)
             return
@@ -142,25 +158,66 @@ final class ControlServer {
         } else {
             response = ControlProtocol.errorResponse(id: nil, error: .malformed)
         }
-        let delivered = response.withUnsafeBytes { bytes -> Bool in
-            var sent = 0
-            while sent < bytes.count {
-                guard let base = bytes.baseAddress else { return false }
-                let n = write(fd, base + sent, bytes.count - sent)
-                if n < 0, errno == EINTR { continue }
-                // Gone (EPIPE) or not reading (EAGAIN): answers are small,
-                // so a full buffer means the client stopped listening.
-                guard n > 0 else { return false }
-                sent += n
-            }
-            return true
+        guard clients[fd] != nil else { return }
+        clients[fd]?.pending.append(response)
+        guard (clients[fd]?.pending.count ?? 0) <= Self.maxPendingBytes else {
+            drop(fd)
+            return
         }
-        if !delivered {
+        flush(fd)
+    }
+
+    /// Sends what the socket takes now. An answer bigger than the socket
+    /// buffer (about 8 KB) comes back as EAGAIN partway; the rest goes out
+    /// from a write source when the client has read some, so the main queue
+    /// never blocks on a slow reader.
+    private func flush(_ fd: Int32) {
+        guard var client = clients[fd] else { return }
+        while !client.pending.isEmpty {
+            let n = client.pending.withUnsafeBytes { bytes in
+                write(fd, bytes.baseAddress, bytes.count)
+            }
+            if n > 0 {
+                client.pending.removeSubrange(client.pending.startIndex..<client.pending.startIndex + n)
+                continue
+            }
+            if n < 0, errno == EINTR { continue }
+            if n < 0, errno == EAGAIN {
+                if client.writeSource == nil {
+                    let source = DispatchSource.makeWriteSource(fileDescriptor: fd, queue: .main)
+                    source.setEventHandler { [weak self] in
+                        MainActor.assumeIsolated { self?.flush(fd) }
+                    }
+                    client.writeSource = source
+                    clients[fd] = client
+                    source.resume()
+                } else {
+                    clients[fd] = client
+                }
+                return
+            }
+            // Gone (EPIPE) or failed.
+            clients[fd] = client
+            drop(fd)
+            return
+        }
+        client.writeSource?.cancel()
+        client.writeSource = nil
+        clients[fd] = client
+        if client.closing {
             drop(fd)
         }
     }
 
     private func drop(_ fd: Int32) {
-        clients.removeValue(forKey: fd)?.source.cancel()
+        guard let client = clients.removeValue(forKey: fd) else { return }
+        // The write source first: the read source's cancel closes the fd.
+        client.writeSource?.cancel()
+        client.source.cancel()
+        if client.closing {
+            // A suspended source runs its cancel handler (the close) only
+            // once resumed.
+            client.source.resume()
+        }
     }
 }

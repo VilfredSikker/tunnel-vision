@@ -122,6 +122,7 @@ final class ControlAPI {
 
         case "session.pause":
             guard model.phase == .work else { throw ControlError.refused("no running session to pause") }
+            guard model.canPause else { throw ControlError.refused("no pause time left in this session") }
             model.pause()
             return ["state": stateJSON()]
 

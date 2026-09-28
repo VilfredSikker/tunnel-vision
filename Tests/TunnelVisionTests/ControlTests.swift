@@ -346,6 +346,56 @@ final class ControlSocketTests: XCTestCase {
         }
     }
 
+    /// An answer bigger than the socket buffer (about 8 KB) must arrive
+    /// whole: a full archive's task list or the app list easily is.
+    func testAnAnswerLargerThanTheSocketBufferArrivesWhole() async throws {
+        let path = try socketPath()
+        let big = String(repeating: "x", count: 512 * 1024)
+        let server = ControlServer(path: path) { _, _ in ["blob": big] }
+        try server.start()
+        defer { server.stop() }
+
+        let result = try await callDetached(ControlClient(socketPath: path), "anything")
+        XCTAssertEqual((result["blob"] as? String)?.count, big.count)
+    }
+
+    /// A client that sends its request and closes its write side (`nc -N`,
+    /// most scripts) still gets the whole answer, large ones included.
+    func testAHalfClosedClientStillGetsTheWholeAnswer() async throws {
+        let path = try socketPath()
+        let big = String(repeating: "y", count: 256 * 1024)
+        let server = ControlServer(path: path) { _, _ in ["blob": big] }
+        try server.start()
+        defer { server.stop() }
+
+        let received: Data = try await Task.detached {
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            defer { close(fd) }
+            var on: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+            var address = try UnixSocketAddress.make(path: path)
+            let connected = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, UnixSocketAddress.length) }
+            }
+            guard connected == 0 else { throw ControlError.unavailable("connect") }
+            let request = ControlProtocol.request(id: "1", method: "echo", params: [:])
+            _ = request.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+            shutdown(fd, SHUT_WR)
+            var data = Data()
+            var chunk = [UInt8](repeating: 0, count: 65536)
+            while true {
+                let n = read(fd, &chunk, chunk.count)
+                guard n > 0 else { break }
+                data.append(chunk, count: n)
+            }
+            return data
+        }.value
+
+        let line = received.split(separator: 0x0A).first.map { Data($0) } ?? Data()
+        let result = try ControlProtocol.parseResponse(line)
+        XCTAssertEqual((result["blob"] as? String)?.count, big.count)
+    }
+
     /// A client that hangs up before its answer (an MCP call timing out, a
     /// one-shot `nc -U`) must not take the app down with SIGPIPE: the app
     /// would die with apps still frozen.
