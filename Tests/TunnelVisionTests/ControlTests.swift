@@ -146,6 +146,26 @@ final class ControlAPITests: XCTestCase {
         _ = try call("presets.delete", ["preset": "Agent"])
         XCTAssertNil(model.preset(named: "Agent"))
         XCTAssertThrowsError(try call("presets.delete", ["preset": "Agent"]))
+        XCTAssertThrowsError(try call("presets.delete", ["preset": "Coding"])) { error in
+            XCTAssertEqual((error as? ControlError)?.code, ControlError.refused("").code, "built-ins cannot be deleted")
+        }
+        XCTAssertNotNil(model.preset(named: "Coding"))
+    }
+
+    /// Strict mode asks for the title to be typed; the API cannot skip that.
+    func testStrictModeRefusesAnAPIStop() throws {
+        var settings = model.settings
+        settings.strictMode = true
+        model.updateSettings(settings)
+        let id = task(try call("tasks.add", ["title": "Focus"]))["id"] as! String
+        _ = try call("session.start", ["id": id])
+
+        XCTAssertThrowsError(try call("session.stop")) { error in
+            XCTAssertEqual((error as? ControlError)?.code, ControlError.refused("").code)
+        }
+        XCTAssertEqual(model.phase, .work)
+        XCTAssertEqual((try call("session.done")["state"] as? [String: Any])?["phase"] as? String, "break",
+                       "finishing with credit is still allowed")
     }
 
     func testSessionFlow() throws {
@@ -283,8 +303,17 @@ final class ControlSocketTests: XCTestCase {
         return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
     }
 
+    /// The server tightens its socket directory to 0700, so each test gets a
+    /// directory of its own rather than the shared temp root.
+    private func socketPath() throws -> String {
+        let directory = NSTemporaryDirectory() + "tv-\(UUID().uuidString.prefix(8))"
+        try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: directory) }
+        return directory + "/control.sock"
+    }
+
     func testClientTalksToServerOverTheSocket() async throws {
-        let path = NSTemporaryDirectory() + "tunnelvision-\(UUID().uuidString.prefix(8)).sock"
+        let path = try socketPath()
         let server = ControlServer(path: path) { method, params in
             guard method == "echo" else { throw ControlError.unknownMethod(method) }
             return ["echoed": params]
@@ -315,5 +344,37 @@ final class ControlSocketTests: XCTestCase {
         } catch ControlError.unavailable {
             // expected
         }
+    }
+
+    /// A client that hangs up before its answer (an MCP call timing out, a
+    /// one-shot `nc -U`) must not take the app down with SIGPIPE: the app
+    /// would die with apps still frozen.
+    func testClientHangingUpBeforeTheReplyDoesNotKillTheServer() async throws {
+        let path = try socketPath()
+        let server = ControlServer(path: path) { _, _ in ["ok": true] }
+        try server.start()
+        defer { server.stop() }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        // Only the server's write may raise SIGPIPE in this test.
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+        var address = try UnixSocketAddress.make(path: path)
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, UnixSocketAddress.length) }
+        }
+        XCTAssertEqual(connected, 0)
+        let request = ControlProtocol.request(id: "1", method: "echo", params: [:])
+        _ = request.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        close(fd)
+
+        // The server reads the request on the main queue and writes its
+        // answer into the closed socket.
+        try await Task.sleep(for: .milliseconds(200))
+
+        XCTAssertTrue(server.isListening)
+        let result = try await callDetached(ControlClient(socketPath: path), "echo")
+        XCTAssertEqual(result["ok"] as? Bool, true, "the server still answers the next client")
     }
 }

@@ -32,6 +32,11 @@ final class ControlServer {
 
     func start() throws {
         guard listenFD < 0 else { return }
+        // Writing to a client that hung up raises SIGPIPE, which would kill
+        // the app with apps still frozen. SO_NOSIGPIPE per client is not
+        // enough: macOS refuses it (EINVAL) on a socket whose peer is
+        // already gone, the exact case it exists for.
+        signal(SIGPIPE, SIG_IGN)
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         // The directory is created under the process umask (usually 0755);
@@ -49,9 +54,9 @@ final class ControlServer {
             close(fd)
             throw ControlError.refused("bind/listen failed: \(code)")
         }
-        // Socket files ignore the creating process's umask in some macOS
-        // versions; fchmod pins the mode on the open descriptor regardless.
-        fchmod(fd, 0o600)
+        // fchmod on a socket descriptor leaves the path's mode alone; the
+        // path itself has to be changed.
+        chmod(path, 0o600)
         listenFD = fd
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
         source.setEventHandler { [weak self] in
@@ -80,6 +85,11 @@ final class ControlServer {
     private func acceptClient() {
         let fd = accept(listenFD, nil, nil)
         guard fd >= 0 else { return }
+        // Belt and braces with the SIG_IGN in start(). Non-blocking, so a
+        // client that stops reading cannot stall the main queue.
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
         source.setEventHandler { [weak self] in
             MainActor.assumeIsolated { self?.read(from: fd) }
@@ -95,6 +105,7 @@ final class ControlServer {
         guard clients[fd] != nil else { return }
         var chunk = [UInt8](repeating: 0, count: 65536)
         let count = Darwin.read(fd, &chunk, chunk.count)
+        if count < 0, errno == EAGAIN || errno == EINTR { return }
         guard count > 0 else {
             drop(fd)
             return
@@ -131,14 +142,21 @@ final class ControlServer {
         } else {
             response = ControlProtocol.errorResponse(id: nil, error: .malformed)
         }
-        response.withUnsafeBytes { bytes in
+        let delivered = response.withUnsafeBytes { bytes -> Bool in
             var sent = 0
             while sent < bytes.count {
-                guard let base = bytes.baseAddress else { return }
+                guard let base = bytes.baseAddress else { return false }
                 let n = write(fd, base + sent, bytes.count - sent)
-                guard n > 0 else { return }
+                if n < 0, errno == EINTR { continue }
+                // Gone (EPIPE) or not reading (EAGAIN): answers are small,
+                // so a full buffer means the client stopped listening.
+                guard n > 0 else { return false }
                 sent += n
             }
+            return true
+        }
+        if !delivered {
+            drop(fd)
         }
     }
 
