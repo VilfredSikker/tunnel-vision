@@ -171,8 +171,15 @@ ZIP_PATH="build/TunnelVision.zip"
 # Nothing is committed, tagged or pushed until the build is notarized and
 # stapled. If a stage fails before that, only Info.plist has changed.
 PLIST_BUMPED=0
+COMMITTED=0
 on_error() {
   printf '\n'
+  if (( COMMITTED )); then
+    warn "release stopped after the version bump was committed and tagged locally."
+    note "Whatever did not push is still local. Fix the cause, then run:"
+    note "  git push origin \"$BRANCH\" && git push origin \"refs/tags/$VERSION\""
+    return
+  fi
   warn "release stopped before anything was committed or pushed."
   if (( PLIST_BUMPED )); then
     note "Info.plist has the new version; discard it with: git checkout -- Support/Info.plist"
@@ -267,6 +274,7 @@ say "The build is good: committing the version bump and pushing tag $VERSION onl
 git add Support/Info.plist
 git commit -m "Bump version to $VERSION"
 PLIST_BUMPED=0
+COMMITTED=1
 git tag "$VERSION"
 git push origin "$BRANCH"
 git push origin "refs/tags/$VERSION"
