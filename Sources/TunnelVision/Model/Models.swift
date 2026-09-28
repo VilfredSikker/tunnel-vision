@@ -318,6 +318,11 @@ struct Settings: Codable, Equatable, Sendable {
     var startPauseHotKey: HotKey?
     /// Global shortcut that opens the picker for the task at hand. Nil: none.
     var pickerHotKey: HotKey?
+    /// Global shortcut that arms the window pick: the next click on a
+    /// window allows it for the running session. Nil: none.
+    var pickWindowHotKey: HotKey?
+    /// First-run permissions walkthrough has been shown.
+    var onboardingDone: Bool = false
     /// Small always-on-top countdown while a session or break runs.
     var showCountdownWindow: Bool = true
     /// Whether that countdown grows a plant over the session.
@@ -337,11 +342,12 @@ struct Settings: Codable, Equatable, Sendable {
         keys[.newTask] = newTaskHotKey
         keys[.startPause] = startPauseHotKey
         keys[.openPicker] = pickerHotKey
+        keys[.pickWindow] = pickWindowHotKey
         return keys
     }
 
     enum CodingKeys: String, CodingKey {
-        case workSeconds, breakSeconds, strictMode, defaultMode, soundOn, toggleHotKey, newTaskHotKey, startPauseHotKey, pickerHotKey, showCountdownWindow, countdownStyle, unmanagedBrowsers, taskSort
+        case workSeconds, breakSeconds, strictMode, defaultMode, soundOn, toggleHotKey, newTaskHotKey, startPauseHotKey, pickerHotKey, pickWindowHotKey, showCountdownWindow, countdownStyle, unmanagedBrowsers, taskSort, onboardingDone
     }
 }
 
@@ -361,10 +367,13 @@ extension Settings {
         newTaskHotKey = try container.decodeIfPresent(HotKey.self, forKey: .newTaskHotKey)
         startPauseHotKey = try container.decodeIfPresent(HotKey.self, forKey: .startPauseHotKey)
         pickerHotKey = try container.decodeIfPresent(HotKey.self, forKey: .pickerHotKey)
+        pickWindowHotKey = try container.decodeIfPresent(HotKey.self, forKey: .pickWindowHotKey)
         showCountdownWindow = try container.decodeIfPresent(Bool.self, forKey: .showCountdownWindow) ?? base.showCountdownWindow
         countdownStyle = try container.decodeIfPresent(CountdownStyle.self, forKey: .countdownStyle) ?? base.countdownStyle
         unmanagedBrowsers = try container.decodeIfPresent([String].self, forKey: .unmanagedBrowsers) ?? base.unmanagedBrowsers
         taskSort = try container.decodeIfPresent(TaskSort.self, forKey: .taskSort) ?? base.taskSort
+        // Existing archives predate onboarding; only a fresh install sees it.
+        onboardingDone = try container.decodeIfPresent(Bool.self, forKey: .onboardingDone) ?? true
     }
 }
 

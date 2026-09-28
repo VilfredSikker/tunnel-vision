@@ -180,24 +180,23 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertTrue(state.deletePreset(id: copy.id))
         XCTAssertNil(state.presets.first { $0.id == copy.id })
-        XCTAssertTrue(state.deletePreset(id: coding.id), "built-ins can be deleted too")
-        XCTAssertNil(state.preset(named: "Coding"))
-        XCTAssertEqual(state.removedBuiltinNames, ["Coding"])
+        XCTAssertFalse(state.deletePreset(id: coding.id), "built-ins can be duplicated and edited, not deleted")
+        XCTAssertNotNil(state.preset(named: "Coding"))
     }
 
-    func testDeletedBuiltinStaysDeletedAcrossReloadUntilRestored() {
-        let state = makeState()
-        let reading = state.preset(named: "Reading")!
-        state.deletePreset(id: reading.id)
+    /// Older builds let built-ins be deleted and remembered them so they
+    /// stayed gone. Built-ins are permanent now, so they come back.
+    func testBuiltinDeletedByAnOlderBuildIsReseeded() throws {
+        _ = makeState()
+        var archive = try JSONDecoder().decode(Archive.self, from: Data(contentsOf: url))
+        archive.presets.removeAll { $0.name == "Reading" }
+        archive.removedBuiltinNames = ["Reading"]
+        try JSONEncoder().encode(archive).write(to: url)
 
         let reloaded = makeState()
-        XCTAssertNil(reloaded.preset(named: "Reading"), "a deleted built-in is not re-seeded on launch")
-        XCTAssertNotNil(reloaded.preset(named: "Coding"), "the other built-ins still are")
-
-        reloaded.restoreBuiltins()
-        XCTAssertNotNil(reloaded.preset(named: "Reading"))
-        XCTAssertTrue(reloaded.removedBuiltinNames.isEmpty)
         XCTAssertEqual(reloaded.presets.filter { $0.name == "Reading" }.count, 1)
+        let saved = try JSONDecoder().decode(Archive.self, from: Data(contentsOf: url))
+        XCTAssertTrue(saved.removedBuiltinNames.isEmpty)
     }
 
     func testArchiveWithoutRemovedBuiltinsKeyStillDecodes() throws {
@@ -452,6 +451,124 @@ final class AppStateTests: XCTestCase {
         state.tick()
         XCTAssertEqual(state.phase, .idle)
         XCTAssertNil(state.nextTaskID)
+    }
+
+    // MARK: Phase popups
+
+    /// Both timer-driven transitions raise exactly one popup, and the tick
+    /// that follows does not raise it again.
+    func testTimerTransitionsRaiseOnePopupEach() {
+        let state = makeState()
+        let (a, b) = seedTwoTasks(in: state)
+        var settings = state.settings
+        settings.breakSeconds = 60
+        state.updateSettings(settings)
+
+        state.startTask(id: a.id)
+        XCTAssertNil(state.phaseAlert)
+        now = now.addingTimeInterval(26 * 60)
+        state.tick()
+        XCTAssertEqual(state.phaseAlert, .workEnded(taskTitle: "Deep work", breakSeconds: 60))
+        state.dismissPhaseAlert()
+        state.tick()
+        XCTAssertNil(state.phaseAlert, "a dismissed popup does not come back on the next tick")
+
+        now = now.addingTimeInterval(61)
+        state.tick()
+        XCTAssertEqual(state.phaseAlert, .breakEnded(nextTaskTitle: b.title))
+        state.tick()
+        XCTAssertEqual(state.phaseAlert, .breakEnded(nextTaskTitle: b.title))
+
+        state.startTask(id: b.id)
+        XCTAssertNil(state.phaseAlert, "starting the next task clears the popup")
+    }
+
+    /// The break-end popup replaces an undismissed work-end one: only the
+    /// latest change is on screen.
+    func testOnlyTheLatestTransitionIsShown() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        var settings = state.settings
+        settings.breakSeconds = 60
+        state.updateSettings(settings)
+
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(26 * 60)
+        state.tick()
+        now = now.addingTimeInterval(61)
+        state.tick()
+        guard case .breakEnded = state.phaseAlert else {
+            return XCTFail("expected the break-end popup, got \(String(describing: state.phaseAlert))")
+        }
+    }
+
+    /// Changes the user makes are not announced.
+    func testUserTransitionsRaiseNoPopup() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        state.skipToBreak()
+        XCTAssertNil(state.phaseAlert)
+        state.skipBreak()
+        XCTAssertNil(state.phaseAlert)
+        state.startTask(id: a.id)
+        state.finishTaskDone()
+        XCTAssertNil(state.phaseAlert)
+    }
+
+    // MARK: Pause limit
+
+    /// A pause lifts the lock, so it ends by itself after five minutes.
+    func testPauseResumesItselfAfterTheLimit() {
+        let state = makeState()
+        let listener = RecordingLockListener()
+        state.lockListener = listener
+        var limitsReached = 0
+        state.onPauseLimitReached = { limitsReached += 1 }
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(60)
+        state.pause()
+        XCTAssertEqual(state.pauseEndsAt, now.addingTimeInterval(AppState.maxPauseSeconds))
+
+        now = now.addingTimeInterval(AppState.maxPauseSeconds - 1)
+        state.tick()
+        XCTAssertEqual(state.phase, .paused)
+
+        now = now.addingTimeInterval(2)
+        state.tick()
+        XCTAssertEqual(state.phase, .work)
+        XCTAssertEqual(listener.calls.last?.active, true, "the lock comes back with the session")
+        XCTAssertEqual(state.remainingSeconds, 24 * 60, "time spent paused is not taken from the session")
+        XCTAssertNil(state.pauseEndsAt)
+        XCTAssertEqual(limitsReached, 1, "the app is told, so it can say the lock is back")
+
+        state.pause()
+        state.resume()
+        XCTAssertEqual(limitsReached, 1, "a resume by hand is not announced")
+    }
+
+    // MARK: Preset URLs
+
+    func testStartingATaskOpensItsPresetURLs() {
+        let state = makeState()
+        var opened: [[URL]] = []
+        state.urlOpener = { opened.append($0) }
+        var coding = state.preset(named: "Coding")!
+        coding.urlsToOpen = ["github.com/me/repo", "https://docs.swift.org", "  ", "not a url"]
+        state.updatePreset(coding)
+        let (a, b) = seedTwoTasks(in: state)
+
+        state.startTask(id: a.id)
+        XCTAssertEqual(opened, [[URL(string: "https://github.com/me/repo")!, URL(string: "https://docs.swift.org")!]])
+
+        state.pause()
+        state.resume()
+        XCTAssertEqual(opened.count, 1, "resuming is not a start")
+
+        state.stopNow()
+        state.startTask(id: b.id)
+        XCTAssertEqual(opened.count, 1, "a task without a preset opens nothing")
     }
 
     func testSkipToBreakDoesNotCredit() {

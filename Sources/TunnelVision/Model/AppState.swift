@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import os
+import TunnelVisionControlKit
 
 /// Phase of the session state machine.
 enum SessionPhase: Equatable, Sendable {
@@ -8,6 +9,16 @@ enum SessionPhase: Equatable, Sendable {
     case work
     case paused
     case breakTime
+}
+
+/// A phase change the timer made on its own, which the app announces with a
+/// popup that stays until dismissed. Changes the user makes (skip, stop,
+/// done) are not announced: they already know.
+enum PhaseAlert: Equatable, Sendable {
+    /// Work time ran out; the break has begun.
+    case workEnded(taskTitle: String, breakSeconds: TimeInterval)
+    /// The break ran out; nothing is locked until the next start.
+    case breakEnded(nextTaskTitle: String?)
 }
 
 /// Receives session-lock changes so the app enforcer can react without the
@@ -28,6 +39,26 @@ final class AppState {
     /// App-enforcement hook. Weak: the enforcer outlives the model in the
     /// app, and tests never set it.
     weak var lockListener: LockListener?
+
+    /// Opens a starting task's preset URLs; the app sets it to NSWorkspace.
+    var urlOpener: (([URL]) -> Void)?
+
+    /// A session started; the app confirms what is now locked.
+    var onSessionStarted: ((TaskItem) -> Void)?
+
+    /// A pause ran into `maxPauseSeconds` and the session resumed by itself.
+    var onPauseLimitReached: (() -> Void)?
+
+    /// What the running task locks to, or nil for an open session (no
+    /// preset and no rules of its own): the same decision the lock makes.
+    var activeLock: (rules: [Rule], mode: Mode)? {
+        guard phase == .work, let task = activeTask else { return nil }
+        if task.presetID != nil {
+            return (effectiveRules(for: task), activePreset?.mode ?? settings.defaultMode)
+        }
+        guard !task.overrides.isEmpty else { return nil }
+        return (effectiveRules(for: task), settings.defaultMode)
+    }
     // MARK: Persisted data
 
     private(set) var tasks: [TaskItem] = []
@@ -36,8 +67,6 @@ final class AppState {
     private(set) var lastUsedPresetID: UUID?
     private(set) var todayCount: Int = 0
     private(set) var countDay: String = ""
-    /// Built-ins the user deleted; `ensureBuiltins` leaves them alone.
-    private(set) var removedBuiltinNames: [String] = []
     /// Plants of today's ended sessions, each as far as it got.
     private(set) var todayGarden: [GrowthRecord] = []
 
@@ -48,6 +77,30 @@ final class AppState {
     private(set) var nextTaskID: TaskItem.ID?
     /// The plant the running session grows; nil outside work and pause.
     private(set) var growth: GrowthPlan?
+
+    /// The timer's last phase change, until the user dismisses it or starts
+    /// something. Never persisted.
+    private(set) var phaseAlert: PhaseAlert?
+
+    func dismissPhaseAlert() {
+        phaseAlert = nil
+    }
+
+    /// Enforcement layers not working as configured, by layer (e.g. window
+    /// rules without Accessibility). Shown in the session header so a lock
+    /// that silently weakened does not pass for a real one.
+    private(set) var lockWarnings: [String: String] = [:]
+
+    func setLockWarning(_ message: String?, layer: String) {
+        if lockWarnings[layer] != message {
+            lockWarnings[layer] = message
+        }
+    }
+
+    /// The warnings in a stable order.
+    var lockWarningMessages: [String] {
+        lockWarnings.keys.sorted().compactMap { lockWarnings[$0] }
+    }
 
     // MARK: UI requests
 
@@ -66,6 +119,8 @@ final class AppState {
     private var workEndsAt: Date?
     /// Remaining work seconds captured at pause time.
     private var pausedRemaining: TimeInterval?
+    /// When the current pause began; it ends by itself after `maxPauseSeconds`.
+    private var pausedAt: Date?
     /// Total work seconds of the current run, for ring progress. Grows when
     /// the session is extended.
     private var workTotal: TimeInterval = 0
@@ -93,16 +148,9 @@ final class AppState {
         clock: @escaping () -> Date = { Date() },
         autoTick: Bool = true
     ) {
-        // Canonical storage location. This path is intentionally fixed — not
-        // derived from bundle ID or app name — so data survives app renames,
-        // reinstalls, and version upgrades. All Tunnel Vision installations on
-        // this machine share it.
-        let fallback = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!
-            .appendingPathComponent("TunnelVision", isDirectory: true)
-            .appendingPathComponent("data.json")
-        self.fileURL = fileURL ?? fallback
+        // Every Tunnel Vision installation on this machine shares this file.
+        // Renaming the support directory orphans existing data.
+        self.fileURL = fileURL ?? AppIdentity.supportDirectory.appendingPathComponent("data.json")
         self.clock = clock
         loadOrSeed()
         if autoTick {
@@ -447,17 +495,13 @@ final class AppState {
         persist()
     }
 
-    /// Any preset can go, built-ins included. A deleted built-in is
-    /// remembered so it is not re-seeded on the next launch; `restoreBuiltins`
-    /// brings the set back. Tasks that referenced it keep their allowlist:
-    /// the preset's rules move into the task's own overrides.
+    /// Deletes a user preset. Built-ins can be duplicated and edited, never
+    /// deleted (DESIGN_BRIEF §4). Tasks that referenced the preset keep
+    /// their allowlist: its rules move into the task's own overrides.
     @discardableResult
     func deletePreset(id: UUID) -> Bool {
-        guard let index = presets.firstIndex(where: { $0.id == id }) else { return false }
+        guard let index = presets.firstIndex(where: { $0.id == id }), !presets[index].isBuiltIn else { return false }
         let removed = presets.remove(at: index)
-        if removed.isBuiltIn, !removedBuiltinNames.contains(removed.name) {
-            removedBuiltinNames.append(removed.name)
-        }
         if lastUsedPresetID == id { lastUsedPresetID = nil }
         let touchedActiveTask = (phase == .work || phase == .paused) && activeTask?.presetID == id
         for taskIndex in tasks.indices where tasks[taskIndex].presetID == id {
@@ -474,19 +518,14 @@ final class AppState {
         return true
     }
 
-    /// Re-adds every deleted built-in preset (fresh copies).
-    func restoreBuiltins() {
-        guard !removedBuiltinNames.isEmpty else { return }
-        removedBuiltinNames = []
-        ensureBuiltins()
-        persist()
-    }
-
     func updatePreset(_ preset: Preset) {
         guard let index = presets.firstIndex(where: { $0.id == preset.id }) else { return }
         var updated = preset
         updated.name = preset.name.trimmingCharacters(in: .whitespaces)
         updated.rules = preset.rules.filter(\.isComplete)
+        updated.urlsToOpen = preset.urlsToOpen
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
         presets[index] = updated
         persist()
         // The running session's allowlist may have changed (rules or mode).
@@ -522,15 +561,47 @@ final class AppState {
         growthBaseProgress = 0
         growthBaseElapsed = 0
         phase = .work
+        phaseAlert = nil
         rememberPreset(task.presetID)
         persist()
         Self.log.info("session started: task=\(task.title, privacy: .public) duration=\(Int(self.workTotal))s mode=\(self.activePreset?.mode.displayName ?? "none", privacy: .public)")
         notifyLockChange()
+        openPresetURLs(for: task)
+        onSessionStarted?(task)
+    }
+
+    /// The preset's "URLs to open when a task starts" (DESIGN_BRIEF §4).
+    /// Entries without a scheme are treated as https.
+    private func openPresetURLs(for task: TaskItem) {
+        guard let presetID = task.presetID, let preset = presets.first(where: { $0.id == presetID }) else { return }
+        let urls = preset.urlsToOpen.compactMap(Self.openableURL)
+        guard !urls.isEmpty else { return }
+        urlOpener?(urls)
+    }
+
+    static func openableURL(_ text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        let withScheme = trimmed.contains("://") ? trimmed : "https://" + trimmed
+        guard let url = URL(string: withScheme, encodingInvalidCharacters: false),
+              url.scheme != nil, url.host != nil else { return nil }
+        return url
+    }
+
+    /// A pause lifts the lock, so it cannot last forever: after this long
+    /// the session resumes by itself.
+    static let maxPauseSeconds: TimeInterval = 5 * 60
+
+    /// When the running pause ends by itself (phase == .paused).
+    var pauseEndsAt: Date? {
+        guard phase == .paused, let pausedAt else { return nil }
+        return pausedAt.addingTimeInterval(Self.maxPauseSeconds)
     }
 
     func pause() {
         guard phase == .work, let endsAt = workEndsAt else { return }
         pausedRemaining = max(0, endsAt.timeIntervalSince(clock()))
+        pausedAt = clock()
         phase = .paused
         persist()
         Self.log.info("session paused: remaining=\(Int(self.pausedRemaining ?? 0))s")
@@ -541,6 +612,7 @@ final class AppState {
     func resume() {
         guard phase == .paused, let remaining = pausedRemaining else { return }
         workEndsAt = clock().addingTimeInterval(remaining)
+        pausedAt = nil
         phase = .work
         persist()
         Self.log.info("session resumed: remaining=\(Int(remaining))s")
@@ -648,6 +720,7 @@ final class AppState {
         guard phase == .breakTime else { return }
         phase = .idle
         nextTaskID = nil
+        phaseAlert = nil
         persist()
         Self.log.info("break skipped")
         notifyLockChange()
@@ -659,14 +732,16 @@ final class AppState {
         switch phase {
         case .work:
             if let endsAt = workEndsAt, clock() >= endsAt {
-                completeWork(creditSession: true)
+                completeWork(creditSession: true, announce: true)
             } else if tickCount % 30 == 0, let remaining = remainingSeconds {
                 Self.log.info("heartbeat: remaining=\(remaining)s")
             }
         case .breakTime:
             if let endsAt = breakEndsAt, clock() >= endsAt {
+                let next = nextTask?.title
                 phase = .idle
                 nextTaskID = nil
+                phaseAlert = .breakEnded(nextTaskTitle: next)
                 persist()
                 if settings.soundOn {
                     SoundPlayer.breakEnd()
@@ -674,7 +749,13 @@ final class AppState {
                 Self.log.info("break ended")
                 notifyLockChange()
             }
-        case .idle, .paused:
+        case .paused:
+            if let pauseEndsAt, clock() >= pauseEndsAt {
+                Self.log.info("pause limit reached")
+                resume()
+                onPauseLimitReached?()
+            }
+        case .idle:
             break
         }
         tickCount += 1
@@ -682,7 +763,10 @@ final class AppState {
 
     // MARK: - Session internals
 
-    private func completeWork(creditSession: Bool) {
+    /// - Parameter announce: the timer ran out on its own, so the break
+    ///   start is announced with a popup.
+    private func completeWork(creditSession: Bool, announce: Bool = false) {
+        let title = activeTask?.title ?? "Focus session"
         recordGrowth()
         if creditSession {
             todayCount += 1
@@ -697,6 +781,7 @@ final class AppState {
         recomputeNextTask()
         phase = .breakTime
         breakEndsAt = clock().addingTimeInterval(max(1, settings.breakSeconds))
+        phaseAlert = announce ? .workEnded(taskTitle: title, breakSeconds: max(1, settings.breakSeconds)) : nil
         clearRun()
         persist()
         if settings.soundOn {
@@ -710,6 +795,7 @@ final class AppState {
         activeTaskID = nil
         workEndsAt = nil
         pausedRemaining = nil
+        pausedAt = nil
         workTotal = 0
         growth = nil
         growthBaseProgress = 0
@@ -760,24 +846,10 @@ final class AppState {
     /// the user is stepping away and apps should not be blocked.
     func notifyLockChange() {
         guard let listener = lockListener else { return }
-        if phase == .work, let task = activeTask {
-            if task.presetID != nil {
-                listener.lockStateChanged(
-                    active: true,
-                    rules: effectiveRules(for: task),
-                    mode: activePreset?.mode ?? settings.defaultMode
-                )
-            } else if task.overrides.isEmpty {
-                listener.lockStateChanged(active: false, rules: [], mode: settings.defaultMode)
-            } else {
-                listener.lockStateChanged(
-                    active: true,
-                    rules: effectiveRules(for: task),
-                    mode: settings.defaultMode
-                )
-            }
+        if let lock = activeLock {
+            listener.lockStateChanged(active: true, rules: lock.rules, mode: lock.mode)
         } else {
-            // Idle, break, and paused all lift the lock.
+            // Idle, break, paused and open sessions all lift the lock.
             listener.lockStateChanged(active: false, rules: [], mode: settings.defaultMode)
         }
     }
@@ -868,7 +940,6 @@ final class AppState {
             lastUsedPresetID = archive.lastUsedPresetID
             todayCount = archive.todayCount
             countDay = archive.countDay
-            removedBuiltinNames = archive.removedBuiltinNames
             todayGarden = archive.garden
             normalizeDay()
             ensureBuiltins()
@@ -896,12 +967,11 @@ final class AppState {
         persist()
     }
 
-    /// Built-ins are re-created if missing (e.g. archive from an older
-    /// build), except the ones the user deleted on purpose.
+    /// Built-ins are re-created if missing: an archive from an older build,
+    /// or one that still let built-ins be deleted.
     private func ensureBuiltins() {
         var changed = false
-        for builtin in BuiltinPresets.all()
-        where !removedBuiltinNames.contains(builtin.name) && !presets.contains(where: { $0.name == builtin.name }) {
+        for builtin in BuiltinPresets.all() where !presets.contains(where: { $0.name == builtin.name }) {
             presets.append(builtin)
             changed = true
         }
@@ -927,7 +997,7 @@ final class AppState {
                 todayCount: todayCount,
                 countDay: countDay,
                 lastUsedPresetID: lastUsedPresetID,
-                removedBuiltinNames: removedBuiltinNames,
+                removedBuiltinNames: [],
                 garden: todayGarden
             )
             let data = try encoder.encode(archive)
