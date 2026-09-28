@@ -107,7 +107,9 @@ final class ControlAPI {
 
         case "presets.delete":
             let preset = try presetParam(params)
-            model.deletePreset(id: preset.id)
+            guard model.deletePreset(id: preset.id) else {
+                throw ControlError.refused("built-in presets can be duplicated or edited, not deleted")
+            }
             return ["deleted": preset.id.uuidString]
 
         case "session.start":
@@ -120,6 +122,7 @@ final class ControlAPI {
 
         case "session.pause":
             guard model.phase == .work else { throw ControlError.refused("no running session to pause") }
+            guard model.canPause else { throw ControlError.refused("no pause time left in this session") }
             model.pause()
             return ["state": stateJSON()]
 
@@ -130,6 +133,11 @@ final class ControlAPI {
 
         case "session.stop":
             guard model.phase == .work || model.phase == .paused else { throw ControlError.refused("no session to stop") }
+            // Strict mode's friction is typing the title by hand; an API
+            // call would skip it.
+            guard !model.settings.strictMode else {
+                throw ControlError.refused("strict mode is on: end the session from Tunnel Vision itself")
+            }
             model.stopNow()
             return ["state": stateJSON()]
 

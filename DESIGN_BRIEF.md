@@ -116,7 +116,9 @@ and dark appearance.
 - Overlay must work on multiple displays and with many windows, forty or more.
 - Light and dark appearance throughout, including the overlay.
 - Keyboard first: every action in the popover and overlay reachable without a mouse.
-- No gamification, no streaks, no confetti. The tone is a quiet assistant.
+- No gamification, no streaks, no confetti. The tone is a quiet assistant. The one
+  exception is the garden: the floating countdown can grow a plant over the session,
+  and today's plants stay as a record of the day. It never scores, ranks or rewards.
 - Colours: one accent for included or allowed, one muted red for blocked or excluded,
   neutral for everything else.
 

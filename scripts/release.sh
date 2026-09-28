@@ -163,71 +163,133 @@ finish() {
 # Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=7
+TOTAL_STAGES=8
+
+APP_PATH="build/TunnelVision.app"
+ZIP_PATH="build/TunnelVision.zip"
+
+# Nothing is committed, tagged or pushed until the build is notarized and
+# stapled. If a stage fails before that, only Info.plist has changed.
+PLIST_BUMPED=0
+COMMITTED=0
+on_error() {
+  printf '\n'
+  if (( COMMITTED )); then
+    warn "release stopped after the version bump was committed and tagged locally."
+    note "Whatever did not push is still local. Fix the cause, then run:"
+    note "  git push origin \"$BRANCH\" && git push origin \"refs/tags/$VERSION\""
+    return
+  fi
+  warn "release stopped before anything was committed or pushed."
+  if (( PLIST_BUMPED )); then
+    note "Info.plist has the new version; discard it with: git checkout -- Support/Info.plist"
+  fi
+}
+trap on_error ERR
 
 banner "Tunnel Vision release"
 
-# ── Stage 1: version ────────────────────────────────────────────────────
-stage "Version"
-say "Bump the version in Info.plist. CFBundleShortVersionString is the user-facing version; CFBundleVersion is the build number."
-ask VERSION "New version - e.g. 0.1.0:"
-note "Will set CFBundleShortVersionString=$VERSION and bump CFBundleVersion."
+# ── Stage 1: preflight ───────────────────────────────────────────────────
+stage "Preflight"
+say "Checking the tree, the branch and the signing identity before anything changes."
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  warn "uncommitted changes to tracked files. Commit or stash them first."
+  exit 1
+fi
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$BRANCH" != "main" ]]; then
+  warn "on branch $BRANCH, not main."
+  confirm "Release from $BRANCH anyway?" || exit 1
+fi
+DEVELOPER_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+  | sed -n 's/^[[:space:]]*[0-9]*) [0-9A-Fa-f]* "\(Developer ID Application[^"]*\)".*/\1/p' | head -n1)
+if [[ -z "$DEVELOPER_ID" ]]; then
+  warn "no \"Developer ID Application\" certificate in the keychain; Apple only notarizes Developer ID builds."
+  note "Create one at developer.apple.com → Certificates, or in Xcode → Settings → Accounts → Manage Certificates."
+  exit 1
+fi
+say "Signing identity: $DEVELOPER_ID"
 
-# ── Stage 2: update Info.plist ─────────────────────────────────────────
+# ── Stage 2: version ────────────────────────────────────────────────────
+stage "Version"
+CURRENT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Support/Info.plist)
+say "Current version: $CURRENT_VERSION. CFBundleShortVersionString is the user-facing version; CFBundleVersion is the build number."
+while true; do
+  ask VERSION "New version, e.g. 0.3.0:"
+  if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    warn "\"$VERSION\" is not MAJOR.MINOR.PATCH."
+  elif git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+    warn "tag $VERSION already exists."
+  else
+    break
+  fi
+done
+
+# ── Stage 3: update Info.plist ─────────────────────────────────────────
 stage "Update Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Support/Info.plist
+PLIST_BUMPED=1
 BUILD_NUM=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" Support/Info.plist)
 BUILD_NUM=$((BUILD_NUM + 1))
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" Support/Info.plist
-say "Updated: CFBundleShortVersionString=$VERSION, CFBundleVersion=$BUILD_NUM"
-
-# ── Stage 3: commit & tag ───────────────────────────────────────────────
-stage "Commit & tag"
-say "Committing the version bump and tagging $VERSION."
-git add Support/Info.plist
-git commit -m "Bump version to $VERSION"
-git tag "$VERSION"
-git push && git push --tags
-say "Tagged and pushed $VERSION."
+say "Updated: CFBundleShortVersionString=$VERSION, CFBundleVersion=$BUILD_NUM (not committed yet)."
 
 # ── Stage 4: build ──────────────────────────────────────────────────────
 stage "Build"
-say "Building the signed .app with hardened runtime."
-make app
-say "Built: build/TunnelVision.app"
+say "Building the signed .app with hardened runtime and a secure timestamp."
+CODESIGN_IDENTITY="$DEVELOPER_ID" make app
+say "Built: $APP_PATH"
 
 # ── Stage 5: notarize ───────────────────────────────────────────────────
 stage "Notarize"
-say "Submitting to Apple for notarization. This takes a minute or two."
-ask APPLE_ID "Apple ID:"
-ask_secret APP_SPECIFIC_PASSWORD "App-specific password:"
-APPLE_TEAM_ID=$(codesign -d -r- build/TunnelVision.app 2>&1 | sed -n 's/.*leaf\[subject.OU\] = "\([^"]*\)".*/\1/p')
-note "Detected team ID: $APPLE_TEAM_ID"
-cd build && ditto -c -k --keepParent TunnelVision.app TunnelVision.zip && cd ..
-xcrun notarytool submit build/TunnelVision.zip \
-  --apple-id "$APPLE_ID" \
-  --password "$APP_SPECIFIC_PASSWORD" \
-  --team-id "$APPLE_TEAM_ID" \
-  --wait
+say "Credentials come from a notarytool keychain profile, so no password is passed on the command line."
+ask NOTARY_PROFILE "Keychain profile name, e.g. tunnelvision-notary:"
+if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+  warn "no working keychain profile \"$NOTARY_PROFILE\" yet. Create it once (it prompts for the app-specific password):"
+  note "  xcrun notarytool store-credentials \"$NOTARY_PROFILE\" --apple-id <you@example.com> --team-id <TEAMID>"
+  pause "Press Enter once it is stored"
+  xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null
+fi
+write_env NOTARY_PROFILE "$NOTARY_PROFILE"
+say "Submitting to Apple. This takes a minute or two."
+ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
+xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
 say "Notarization accepted."
 
 # ── Stage 6: staple & verify ────────────────────────────────────────────
 stage "Staple & verify"
-say "Attaching the notarization ticket and verifying."
-xcrun stapler staple build/TunnelVision.app
-xcrun stapler validate build/TunnelVision.app
-spctl --assess --type execute build/TunnelVision.app
-say "Stapled and verified."
+say "Attaching the notarization ticket, verifying, and zipping the stapled app."
+xcrun stapler staple "$APP_PATH"
+xcrun stapler validate "$APP_PATH"
+spctl --assess --type execute "$APP_PATH"
+# The zip that was submitted predates the ticket; the release gets a fresh
+# one that carries it, so it also opens offline.
+rm -f "$ZIP_PATH"
+ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
+say "Stapled, verified and zipped: $ZIP_PATH"
 
-# ── Stage 7: GitHub Release ─────────────────────────────────────────────
+# ── Stage 7: commit, tag & push ─────────────────────────────────────────
+stage "Commit, tag & push"
+say "The build is good: committing the version bump and pushing tag $VERSION only."
+git add Support/Info.plist
+git commit -m "Bump version to $VERSION"
+PLIST_BUMPED=0
+COMMITTED=1
+git tag "$VERSION"
+git push origin "$BRANCH"
+git push origin "refs/tags/$VERSION"
+say "Pushed $BRANCH and tag $VERSION."
+
+# ── Stage 8: GitHub Release ─────────────────────────────────────────────
 stage "GitHub Release"
-say "Create the release on GitHub and upload the zip."
+say "Create the release on GitHub and upload the stapled zip."
 REPO=$(git remote get-url origin | sed -E 's/.*github.com[:\/](.*)\.git/\1/')
 open_url "https://github.com/$REPO/releases/new?tag=$VERSION"
-step "Set the tag to $VERSION - should already be selected."
+step "The tag $VERSION should already be selected."
 step "Title: $VERSION."
-step "Attach build/TunnelVision.zip."
+step "Attach $ZIP_PATH."
 step "Publish the release."
 pause "Published?"
 
+trap - ERR
 finish

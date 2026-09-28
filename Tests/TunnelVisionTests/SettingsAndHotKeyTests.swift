@@ -4,7 +4,84 @@ import XCTest
 
 @testable import TunnelVision
 
+/// Quitting and signals: the paths that decide whether frozen apps are let
+/// go and whether macOS can log out.
+@MainActor
+final class QuitPathTests: XCTestCase {
+    private func quitEvent(reason: Int?) -> NSAppleEventDescriptor {
+        let event = NSAppleEventDescriptor.appleEvent(
+            withEventClass: AEEventClass(kCoreEventClass),
+            eventID: AEEventID(kAEQuitApplication),
+            targetDescriptor: nil,
+            returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID)
+        )
+        if let reason {
+            event.setAttribute(NSAppleEventDescriptor(enumCode: OSType(reason)), forKeyword: AEKeyword(kAEQuitReason))
+        }
+        return event
+    }
+
+    /// A wrong reason code would hold logout, restart or shutdown behind the
+    /// end-early dialog.
+    func testLogoutRestartAndShutdownSkipTheQuitGate() {
+        for reason in [kAELogOut, kAEReallyLogOut, kAEShowRestartDialog, kAERestart, kAEShowShutdownDialog, kAEShutDown] {
+            XCTAssertTrue(EarlyEndConfirmation.isSystemQuit(quitEvent(reason: Int(reason))), "reason \(reason)")
+        }
+    }
+
+    func testAPlainQuitGoesThroughTheGate() {
+        XCTAssertFalse(EarlyEndConfirmation.isSystemQuit(nil), "Cmd-Q and the Quit button send no Apple Event")
+        XCTAssertFalse(EarlyEndConfirmation.isSystemQuit(quitEvent(reason: nil)), "an AppleScript quit has no reason")
+        let open = NSAppleEventDescriptor.appleEvent(
+            withEventClass: AEEventClass(kCoreEventClass),
+            eventID: AEEventID(kAEOpenApplication),
+            targetDescriptor: nil,
+            returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID)
+        )
+        open.setAttribute(NSAppleEventDescriptor(enumCode: OSType(kAELogOut)), forKeyword: AEKeyword(kAEQuitReason))
+        XCTAssertFalse(EarlyEndConfirmation.isSystemQuit(open), "only a quit event counts")
+    }
+
+    /// The handler runs on the main queue and the process survives the
+    /// signal: the default action is off before the source exists.
+    func testASignalRunsTheHandlerInsteadOfKillingTheProcess() async {
+        let signals = TerminationSignals()
+        var received: [Int32] = []
+        signals.install(signals: [SIGUSR2]) { received.append($0) }
+        kill(getpid(), SIGUSR2)
+        let deadline = Date().addingTimeInterval(2)
+        while received.isEmpty, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(received, [SIGUSR2])
+    }
+}
+
 final class SettingsAndHotKeyTests: XCTestCase {
+    /// Before: every focus snapped the window to the center. Now only a
+    /// frame stranded off every display is moved.
+    func testSettingsWindowIsRecenteredOnlyWhenOffEveryScreen() {
+        let screens = [CGRect(x: 0, y: 0, width: 1440, height: 900), CGRect(x: 1440, y: 0, width: 2560, height: 1440)]
+        XCTAssertFalse(SettingsWindowPlacement.needsRecentering(
+            frame: CGRect(x: 200, y: 200, width: 440, height: 450), visibleFrames: screens
+        ), "a window the user placed stays put")
+        XCTAssertFalse(SettingsWindowPlacement.needsRecentering(
+            frame: CGRect(x: 1300, y: 100, width: 440, height: 450), visibleFrames: screens
+        ), "straddling two displays is still on screen")
+        XCTAssertTrue(SettingsWindowPlacement.needsRecentering(
+            frame: CGRect(x: 5000, y: 720, width: 440, height: 450), visibleFrames: screens
+        ), "left on an unplugged display")
+    }
+
+    func testAutomationAnswersMapToAStatusPerBrowser() {
+        XCTAssertEqual(AutomationPermission.status(for: noErr), .granted)
+        XCTAssertEqual(AutomationPermission.status(for: OSStatus(errAEEventNotPermitted)), .declined)
+        XCTAssertEqual(AutomationPermission.status(for: OSStatus(errAEEventWouldRequireUserConsent)), .notAsked)
+        XCTAssertEqual(AutomationPermission.status(for: OSStatus(procNotFound)), .notRunning)
+    }
+
     func testSettingsDecodeFromArchiveWithoutNewKeys() throws {
         let json = """
         {"workSeconds":1500,"breakSeconds":300,"strictMode":true,"defaultMode":"frozen","soundOn":false}
@@ -20,6 +97,18 @@ final class SettingsAndHotKeyTests: XCTestCase {
         XCTAssertNil(settings.pickerHotKey)
         XCTAssertTrue(settings.showCountdownWindow, "the floating countdown defaults on")
         XCTAssertEqual(settings.unmanagedBrowsers, [], "every supported browser is managed until switched off")
+        XCTAssertNil(settings.pickWindowHotKey)
+        XCTAssertTrue(settings.onboardingDone, "an existing install is not walked through onboarding")
+        XCTAssertFalse(Settings().onboardingDone, "a fresh install is")
+    }
+
+    func testPickWindowShortcutRoundTrips() throws {
+        var settings = Settings()
+        settings.pickWindowHotKey = HotKey(keyCode: 35, carbonModifiers: HotKey.command | HotKey.shift, keyLabel: "P")
+        let decoded = try JSONDecoder().decode(Settings.self, from: JSONEncoder().encode(settings))
+        XCTAssertEqual(decoded.pickWindowHotKey, settings.pickWindowHotKey)
+        XCTAssertEqual(decoded.hotKeys[.pickWindow], settings.pickWindowHotKey)
+        XCTAssertEqual(HotKeyCenter.Slot(rawValue: 5), .pickWindow)
     }
 
     func testSettingsRoundTripKeepsShortcutsCountdownAndBrowsers() throws {

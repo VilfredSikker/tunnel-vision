@@ -8,7 +8,7 @@ import Foundation
 // socket before answering.
 
 let client = ControlClient()
-let bundleID = "com.tunnelvision.timer"
+let bundleID = AppIdentity.bundleID
 
 func log(_ text: String) {
     FileHandle.standardError.write(Data(("tunnelvision-mcp: " + text + "\n").utf8))
@@ -55,7 +55,7 @@ func pretty(_ object: [String: Any]) -> String {
     return text
 }
 
-let server = MCPServer(name: "tunnelvision", version: "0.2.0", tools: ControlTools.all) { tool, arguments in
+let server = MCPServer(name: "tunnelvision", version: AppIdentity.helperVersion(), tools: ControlTools.all) { tool, arguments in
     guard let route = ControlTools.route(tool: tool, arguments: arguments) else {
         let known = ControlTools.all.contains { $0.name == tool }
         return MCPToolResult(text: known ? "Missing or invalid arguments for \(tool)" : "Unknown tool \(tool)", isError: true)

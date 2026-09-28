@@ -54,7 +54,7 @@ final class HerdrProtocolTests: XCTestCase {
         let unrelated = Data(#"{"event":"tab_focused","data":{"type":"tab_focused","tab_id":"w1:t1"}}"#.utf8)
         XCTAssertEqual(HerdrProtocol.parseEvent(unrelated), .other)
 
-        let ack = Data(#"{"id":"anchor-events","result":{"type":"subscription_started"}}"#.utf8)
+        let ack = Data(#"{"id":"tunnelvision-events","result":{"type":"subscription_started"}}"#.utf8)
         XCTAssertNil(HerdrProtocol.parseEvent(ack), "responses are not events")
     }
 
@@ -75,8 +75,12 @@ final class FakeHerdrClient: HerdrControlling {
     var focused: [String] = []
     var notices: [String] = []
     var focusError: Error?
+    var snapshotError: Error?
 
-    func snapshot() async throws -> HerdrSnapshot { snapshotResult }
+    func snapshot() async throws -> HerdrSnapshot {
+        if let snapshotError { throw snapshotError }
+        return snapshotResult
+    }
 
     func focusWorkspace(id: String) async throws {
         if let focusError { throw focusError }
@@ -210,11 +214,40 @@ final class HerdrWorkspaceGuardTests: XCTestCase {
         XCTAssertTrue(guardian.allowedLabels.isEmpty)
     }
 
-    func testMissingSocketKeepsTheGuardInactive() {
+    /// Before: a socket missing at lock time switched the guard off for the
+    /// whole session, silently. Now it stays locked, keeps retrying, and
+    /// says so meanwhile.
+    func testMissingSocketKeepsTheLockAndRetries() {
         let (guardian, client) = makeGuard(labels: [], focused: nil)
         client.isAvailable = false
+        client.snapshotError = HerdrError.disconnected
+        var warnings: [String?] = []
+        guardian.onWarning = { warnings.append($0) }
         guardian.lockStateChanged(active: true, rules: [Rule(bundleID: "", scope: .herdr, pattern: "promodoro-cop")], mode: .dark)
-        XCTAssertFalse(guardian.isActive, "no herdr, no herdr lock — the app-level lock still holds")
+        XCTAssertTrue(guardian.isActive, "herdr starting after the lock is still picked up")
+        XCTAssertEqual(warnings.count, 1, "a missing socket is reported at once, in time for the start confirmation")
+        guardian.deactivate()
+    }
+
+    func testUnreachableHerdrIsReportedUntilItAnswers() async {
+        let (guardian, client) = makeGuard(labels: ["promodoro-cop"], focused: "w9")
+        var warnings: [String?] = []
+        guardian.onWarning = { warnings.append($0) }
+        client.snapshotError = HerdrError.disconnected
+
+        await guardian.connectOnce()
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertNotNil(warnings.last ?? nil)
+        await guardian.connectOnce()
+        XCTAssertEqual(warnings.count, 1, "no repeat while nothing changed")
+
+        client.snapshotError = nil
+        await guardian.connectOnce()
+        XCTAssertNil(warnings.last ?? "still warning")
+        XCTAssertEqual(client.focused, ["w1"], "the bootstrap bounce runs once herdr answers")
+
+        guardian.deactivate()
+        XCTAssertNil(warnings.last ?? "still warning")
     }
 }
 

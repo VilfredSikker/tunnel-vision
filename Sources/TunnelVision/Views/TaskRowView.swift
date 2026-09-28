@@ -287,6 +287,7 @@ struct TaskRowView: View {
         Group {
             if isActive {
                 Button(model.phase == .paused ? "Resume" : "Pause") { model.togglePause() }
+                    .disabled(model.phase == .work && !model.canPause)
             } else {
                 Button(isDone ? "Run again as new task" : "Start") { start() }
                     .disabled(!canStart)

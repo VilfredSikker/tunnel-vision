@@ -49,27 +49,50 @@ func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: inout CGWindowID)
 enum AccessibilityTitles {
     /// Titles of the given apps' windows keyed by CGWindowID; empty without
     /// the permission. A busy or frozen app is skipped after a short timeout
-    /// instead of stalling the picker.
+    /// instead of stalling the picker. The apps are asked in parallel, about
+    /// one per CPU core at a time, so timeouts add up per batch rather than
+    /// per app: in a Frozen session every stopped app runs into its timeout.
     static func titles(forPIDs pids: [pid_t]) -> [CGWindowID: String] {
         guard AXIsProcessTrusted() else { return [:] }
+        let collected = TitleCollector()
+        DispatchQueue.concurrentPerform(iterations: pids.count) { index in
+            collected.merge(titles(forPID: pids[index]))
+        }
+        return collected.titles
+    }
+
+    private static func titles(forPID pid: pid_t) -> [CGWindowID: String] {
+        let application = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(application, 0.25)
+        var windowsValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+              let windows = windowsValue as? [AXUIElement] else { return [:] }
         var titles: [CGWindowID: String] = [:]
-        for pid in pids {
-            let application = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(application, 0.25)
-            var windowsValue: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &windowsValue) == .success,
-                  let windows = windowsValue as? [AXUIElement] else { continue }
-            for window in windows {
-                var windowID: CGWindowID = 0
-                guard _AXUIElementGetWindow(window, &windowID) == .success, windowID != 0 else { continue }
-                var titleValue: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success,
-                      let title = (titleValue as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !title.isEmpty else { continue }
-                titles[windowID] = title
-            }
+        for window in windows {
+            AXUIElementSetMessagingTimeout(window, 0.25)
+            var windowID: CGWindowID = 0
+            guard _AXUIElementGetWindow(window, &windowID) == .success, windowID != 0 else { continue }
+            var titleValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success,
+                  let title = (titleValue as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty else { continue }
+            titles[windowID] = title
         }
         return titles
+    }
+
+    /// Gathers per-app results from the concurrent readers.
+    private final class TitleCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var gathered: [CGWindowID: String] = [:]
+
+        func merge(_ found: [CGWindowID: String]) {
+            lock.withLock { gathered.merge(found) { first, _ in first } }
+        }
+
+        var titles: [CGWindowID: String] {
+            lock.withLock { gathered }
+        }
     }
 }
 
@@ -154,8 +177,41 @@ enum WindowCatalogue {
     /// Anything smaller is a menu leftover, tooltip or palette scrap.
     private nonisolated static let minimumWindowSize = CGSize(width: 80, height: 50)
 
+    /// Synchronous, for the control API's one-shot listing.
     static func onScreenApps() -> [PickerAppInfo] {
-        let apps = NSWorkspace.shared.runningApplications.map { app in
+        let apps = runningAppRecords()
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        // CGWindowList carries titles only with Screen Recording; otherwise
+        // the Accessibility API supplies them per window id.
+        var extraTitles: [CGWindowID: String] = [:]
+        if !ScreenCapturePermission.isAllowed {
+            extraTitles = AccessibilityTitles.titles(forPIDs: titlePIDs(apps, selfPID: selfPID))
+        }
+        return assemble(apps: apps, windows: onScreenWindows(), extraTitles: extraTitles, selfPID: selfPID)
+    }
+
+    /// For the picker: the Accessibility titles are read off the main
+    /// thread, so opening it never waits on a busy or frozen app there.
+    static func onScreenAppsLoadingTitles() async -> [PickerAppInfo] {
+        let apps = runningAppRecords()
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let windows = onScreenWindows()
+        var extraTitles: [CGWindowID: String] = [:]
+        if !ScreenCapturePermission.isAllowed {
+            let pids = titlePIDs(apps, selfPID: selfPID)
+            extraTitles = await Task.detached(priority: .userInitiated) {
+                AccessibilityTitles.titles(forPIDs: pids)
+            }.value
+        }
+        return assemble(apps: apps, windows: windows, extraTitles: extraTitles, selfPID: selfPID)
+    }
+
+    private static func titlePIDs(_ apps: [RunningAppRecord], selfPID: pid_t) -> [pid_t] {
+        apps.filter { $0.activationPolicy == .regular && $0.pid != selfPID }.map(\.pid)
+    }
+
+    private static func runningAppRecords() -> [RunningAppRecord] {
+        NSWorkspace.shared.runningApplications.map { app in
             RunningAppRecord(
                 pid: app.processIdentifier,
                 bundleID: app.bundleIdentifier,
@@ -164,15 +220,6 @@ enum WindowCatalogue {
                 icon: app.icon
             )
         }
-        let selfPID = ProcessInfo.processInfo.processIdentifier
-        // CGWindowList carries titles only with Screen Recording; otherwise
-        // the Accessibility API supplies them per window id.
-        var extraTitles: [CGWindowID: String] = [:]
-        if !ScreenCapturePermission.isAllowed {
-            let pids = apps.filter { $0.activationPolicy == .regular && $0.pid != selfPID }.map(\.pid)
-            extraTitles = AccessibilityTitles.titles(forPIDs: pids)
-        }
-        return assemble(apps: apps, windows: onScreenWindows(), extraTitles: extraTitles, selfPID: selfPID)
     }
 
     /// Pure grouping and filtering. Only regular apps other than ourselves

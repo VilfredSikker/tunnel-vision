@@ -16,6 +16,7 @@ final class HotKeyCenter {
         case newTask = 2
         case startPause = 3
         case openPicker = 4
+        case pickWindow = 5
 
         var name: String {
             switch self {
@@ -23,6 +24,7 @@ final class HotKeyCenter {
             case .newTask: "new task"
             case .startPause: "start/pause"
             case .openPicker: "picker"
+            case .pickWindow: "pick window"
             }
         }
 
@@ -33,6 +35,7 @@ final class HotKeyCenter {
             case .newTask: "New task"
             case .startPause: "Start or pause"
             case .openPicker: "Open the picker"
+            case .pickWindow: "Allow the next window I click"
             }
         }
     }

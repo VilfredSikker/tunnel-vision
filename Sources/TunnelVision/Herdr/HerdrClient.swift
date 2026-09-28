@@ -174,7 +174,7 @@ final class HerdrSocketClient: HerdrControlling {
                         ["type": "workspace.created"],
                     ]
                     try await connection.send(HerdrProtocol.request(
-                        id: "anchor-events",
+                        id: "tunnelvision-events",
                         method: "events.subscribe",
                         params: ["subscriptions": subscriptions]
                     ))
@@ -207,7 +207,7 @@ final class HerdrSocketClient: HerdrControlling {
         let connection = HerdrLineConnection(path: socketPath)
         defer { connection.close() }
         try await connection.open()
-        try await connection.send(HerdrProtocol.request(id: "anchor-\(method)", method: method, params: params))
+        try await connection.send(HerdrProtocol.request(id: "tunnelvision-\(method)", method: method, params: params))
         let line = try await connection.nextLine()
         if let message = HerdrProtocol.errorMessage(in: line) {
             throw HerdrError.server(message)

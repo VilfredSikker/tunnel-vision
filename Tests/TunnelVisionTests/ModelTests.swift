@@ -4,6 +4,27 @@ import XCTest
 @testable import TunnelVision
 
 final class ModelTests: XCTestCase {
+    func testLockSummaryNamesWhatStaysAllowed() {
+        let names = ["com.apple.dt.Xcode": "Xcode", "com.apple.Safari": "Safari"]
+        let rules = [
+            Rule(bundleID: "com.apple.dt.Xcode"),
+            Rule(bundleID: "com.apple.dt.Xcode"),
+            Rule(bundleID: "com.apple.Safari", scope: .url, pattern: "github.com"),
+            Rule(bundleID: "com.apple.Safari", scope: .window, pattern: ""),
+            Rule(bundleID: "com.apple.Mail", effect: .deny),
+        ]
+        XCTAssertEqual(
+            LockSummary.describe(rules: rules, mode: .frozen) { names[$0] ?? $0 },
+            "Allowed: Xcode, github.com in Safari. Everything else is frozen.",
+            "duplicates, incomplete and deny rules are left out"
+        )
+        let many = (1...6).map { Rule(bundleID: "app.\($0)") }
+        XCTAssertEqual(
+            LockSummary.describe(rules: many, mode: .dark) { $0 },
+            "Allowed: app.1, app.2, app.3, app.4 and 2 more. Everything else is hidden."
+        )
+    }
+
     func testBuiltinPresets() throws {
         let presets = BuiltinPresets.all()
         XCTAssertEqual(presets.map(\.name), ["Coding", "Writing", "Comms", "Reading"])

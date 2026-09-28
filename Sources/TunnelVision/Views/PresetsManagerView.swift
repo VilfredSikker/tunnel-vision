@@ -57,12 +57,7 @@ struct PresetsManagerView: View {
     }
 
     private var deleteMessage: String {
-        let isBuiltIn = model.presets.first { $0.id == pendingDeleteID }?.isBuiltIn ?? false
-        var text = "Tasks using it fall back to a custom allowlist."
-        if isBuiltIn {
-            text += " Deleted built-ins can be restored from the list."
-        }
-        return text
+        "Tasks using it fall back to a custom allowlist."
     }
 
     // MARK: List pane
@@ -106,18 +101,6 @@ struct PresetsManagerView: View {
                 .tag(preset.id)
             }
             .listStyle(.inset)
-
-            if !model.removedBuiltinNames.isEmpty {
-                Button {
-                    model.restoreBuiltins()
-                } label: {
-                    Label("Restore built-in presets", systemImage: "arrow.counterclockwise")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-                .padding(12)
-                .help("Bring back \(model.removedBuiltinNames.joined(separator: ", "))")
-            }
         }
         .frame(width: 230)
     }
@@ -162,9 +145,11 @@ struct PresetsManagerView: View {
                 }
                 Spacer()
                 Button("Duplicate") { duplicate(preset) }
-                Button("Delete", role: .destructive) {
-                    pendingDeleteID = preset.id
-                    showDeleteAlert = true
+                if !preset.isBuiltIn {
+                    Button("Delete", role: .destructive) {
+                        pendingDeleteID = preset.id
+                        showDeleteAlert = true
+                    }
                 }
             }
 
@@ -221,6 +206,8 @@ struct PresetsManagerView: View {
                 .frame(maxHeight: .infinity, alignment: .top)
             }
 
+            urlsToOpenEditor
+
             Divider()
 
             HStack {
@@ -243,6 +230,25 @@ struct PresetsManagerView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// One URL per line, opened when a task with this preset starts.
+    private var urlsToOpenEditor: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Open when a task starts")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextEditor(text: Binding(
+                get: { (draft?.urlsToOpen ?? []).joined(separator: "\n") },
+                set: { text in
+                    draft?.urlsToOpen = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                }
+            ))
+            .font(.callout.monospaced())
+            .frame(height: 54)
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.3)))
+            .help("One URL per line, e.g. github.com/you/repo")
+        }
     }
 
     private func duplicate(_ preset: Preset) {
