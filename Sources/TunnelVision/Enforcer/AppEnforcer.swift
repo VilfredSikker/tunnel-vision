@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import os
+import TunnelVisionControlKit
 
 // MARK: - Enforcement model
 
@@ -168,15 +169,23 @@ final class FrozenPidStore {
         var pid: Int
         var hidden: Bool
         var frozen: Bool
+        /// The app the pid belonged to. After a crash and a long gap the pid
+        /// may be another process; restore acts only when it still matches.
+        /// Nil in stores written before it was recorded.
+        var bundleID: String?
+
+        init(pid: Int, hidden: Bool, frozen: Bool, bundleID: String? = nil) {
+            self.pid = pid
+            self.hidden = hidden
+            self.frozen = frozen
+            self.bundleID = bundleID
+        }
     }
 
     private let url: URL
 
     init(url: URL? = nil) {
-        let fallback = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("TunnelVision", isDirectory: true)
-            .appendingPathComponent("frozen-pids.json")
-        self.url = url ?? fallback
+        self.url = url ?? AppIdentity.supportDirectory.appendingPathComponent("frozen-pids.json")
     }
 
     func record(victims: [Victim]) {
@@ -226,8 +235,13 @@ final class AppEnforcer: LockListener {
     private var sessionOverrideBundles: Set<String> = []
     private var hiddenPIDs: Set<pid_t> = []
     private var frozenPIDs: Set<pid_t> = []
+    /// Hidden, waiting for the hide to land before the stop.
+    private var pendingFreezes: Set<pid_t> = []
+    /// Bundle of each victim, captured when it was hidden, for the store.
+    private var victimBundles: [pid_t: String] = [:]
     private var observers: [NSObjectProtocol] = []
-    private var lastNoticeAt: [String: Date] = [:]
+    private var noticeThrottle = NoticeThrottle()
+    private let freezeHideTimeout: Duration
 
     private(set) var isLocking = false
 
@@ -235,12 +249,16 @@ final class AppEnforcer: LockListener {
     /// shows the non-blocking notice.
     var onBlockedApp: ((_ name: String, _ bundleID: String) -> Void)?
 
+    /// - Parameter freezeHideTimeout: how long a frozen-mode victim may take
+    ///   to hide before it is stopped anyway.
     init(
         process: ProcessManaging = WorkspaceProcessManager(),
-        frozenStore: FrozenPidStore = FrozenPidStore()
+        frozenStore: FrozenPidStore = FrozenPidStore(),
+        freezeHideTimeout: Duration = .seconds(1)
     ) {
         self.process = process
         self.frozenStore = frozenStore
+        self.freezeHideTimeout = freezeHideTimeout
         thawOnLaunch()
     }
 
@@ -275,7 +293,9 @@ final class AppEnforcer: LockListener {
         isLocking = false
         allowed = []
         sessionOverrideBundles = []
-        lastNoticeAt = [:]
+        pendingFreezes = []
+        isHeld = false
+        noticeThrottle.reset()
         stopWatching()
         thawFrozen()
         unhideHidden()
@@ -331,9 +351,21 @@ final class AppEnforcer: LockListener {
         persistVictims()
     }
 
+    /// Set while the window pick is armed: the user may bring up a blocked
+    /// app to click its window, so nothing is hidden until the hold ends.
+    private(set) var isHeld = false
+
+    func hold(_ on: Bool) {
+        guard on != isHeld else { return }
+        isHeld = on
+        if !on, isLocking {
+            enforceRunningApplications()
+        }
+    }
+
     /// Enforce one snapshot (internal so tests can drive app events).
     func enforce(snapshot: ProcessSnapshot) {
-        guard isLocking else { return }
+        guard isLocking, !isHeld else { return }
         if snapshot.isSelf { return }
         let decision = Enforcement.decide(
             mode: mode,
@@ -348,8 +380,7 @@ final class AppEnforcer: LockListener {
         case .dark:
             let wasHidden = hiddenPIDs.contains(snapshot.pid)
             process.hide(pid: snapshot.pid)
-            hiddenPIDs.insert(snapshot.pid)
-            persistVictims()
+            recordHidden(snapshot)
             Self.log.info("dark: hid \(snapshot.name, privacy: .public)")
             scheduleHideRechecks(pid: snapshot.pid)
             if !wasHidden {
@@ -361,25 +392,68 @@ final class AppEnforcer: LockListener {
             notifyBlocked(snapshot)
         case .frozen:
             // Freeze = hide + SIGSTOP (FEASIBILITY.md); SIGCONT on unlock.
-            // The pid is recorded as frozen optimistically, BEFORE the stop:
-            // a crash between SIGSTOP and the next persist would otherwise
-            // leave an app stopped but recorded hidden-only. A stale frozen
-            // record is harmless — SIGCONT to a running process is a no-op.
+            // The hide is asynchronous and a stopped app cannot process it,
+            // so the stop waits until the app is hidden (bounded).
             let wasHidden = hiddenPIDs.contains(snapshot.pid)
             process.hide(pid: snapshot.pid)
-            hiddenPIDs.insert(snapshot.pid)
-            frozenPIDs.insert(snapshot.pid)
-            persistVictims()
-            if process.suspend(pid: snapshot.pid) {
-                Self.log.info("frozen: SIGSTOP \(snapshot.name, privacy: .public) pid=\(snapshot.pid)")
-                if !wasHidden {
-                    notifyBlocked(snapshot)
-                }
-            } else {
-                frozenPIDs.remove(snapshot.pid)
-                persistVictims()
-                Self.log.info("frozen: SIGSTOP failed for \(snapshot.name, privacy: .public) — kept hidden only")
+            recordHidden(snapshot)
+            if !wasHidden {
+                notifyBlocked(snapshot)
             }
+            guard !frozenPIDs.contains(snapshot.pid), !pendingFreezes.contains(snapshot.pid) else { return }
+            if process.isHidden(pid: snapshot.pid) {
+                completeFreeze(pid: snapshot.pid)
+            } else {
+                scheduleFreeze(pid: snapshot.pid)
+            }
+        }
+    }
+
+    private func recordHidden(_ snapshot: ProcessSnapshot) {
+        hiddenPIDs.insert(snapshot.pid)
+        if let bundle = snapshot.bundleID {
+            victimBundles[snapshot.pid] = bundle
+        }
+        persistVictims()
+    }
+
+    /// Polls until the victim has hidden, then stops it; after the timeout
+    /// it is stopped anyway, since an unfrozen app off the allowlist is the
+    /// worse outcome.
+    private func scheduleFreeze(pid: pid_t) {
+        pendingFreezes.insert(pid)
+        let deadline = ContinuousClock.now + freezeHideTimeout
+        Task { @MainActor [weak self] in
+            while ContinuousClock.now < deadline {
+                guard let self, self.pendingFreezes.contains(pid) else { return }
+                if self.process.isHidden(pid: pid) { break }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            guard let self, self.pendingFreezes.contains(pid) else { return }
+            self.completeFreeze(pid: pid)
+        }
+    }
+
+    /// Stops a hidden frozen-mode victim, unless the session ended or the
+    /// app was allowed meanwhile (internal so tests can drive it).
+    ///
+    /// The pid is recorded as frozen before the stop: a crash between
+    /// SIGSTOP and the next persist would otherwise leave an app stopped
+    /// but recorded hidden-only. A stale frozen record is harmless, since
+    /// SIGCONT to a running process is a no-op.
+    func completeFreeze(pid: pid_t) {
+        pendingFreezes.remove(pid)
+        guard isLocking, mode == .frozen, hiddenPIDs.contains(pid), !frozenPIDs.contains(pid),
+              process.isRunning(pid: pid) else { return }
+        guard let bundle = process.bundleID(of: pid), !allowed.contains(bundle) else { return }
+        frozenPIDs.insert(pid)
+        persistVictims()
+        if process.suspend(pid: pid) {
+            Self.log.info("frozen: SIGSTOP \(bundle, privacy: .public) pid=\(pid)")
+        } else {
+            frozenPIDs.remove(pid)
+            persistVictims()
+            Self.log.info("frozen: SIGSTOP failed for \(bundle, privacy: .public) — kept hidden only")
         }
     }
 
@@ -458,10 +532,7 @@ final class AppEnforcer: LockListener {
     }
 
     private func notifyBlocked(_ snapshot: ProcessSnapshot) {
-        guard let bundle = snapshot.bundleID else { return }
-        let now = Date()
-        if let last = lastNoticeAt[bundle], now.timeIntervalSince(last) < 4 { return }
-        lastNoticeAt[bundle] = now
+        guard let bundle = snapshot.bundleID, noticeThrottle.allow(bundle) else { return }
         onBlockedApp?(snapshot.name, bundle)
     }
 
@@ -486,13 +557,19 @@ final class AppEnforcer: LockListener {
             process.unhide(pid: pid)
         }
         hiddenPIDs = []
+        victimBundles = [:]
     }
 
     /// What survives a crash: every app we hid or froze, with its fate.
     private func persistVictims() {
         var victims: [FrozenPidStore.Victim] = []
         for pid in hiddenPIDs {
-            victims.append(FrozenPidStore.Victim(pid: Int(pid), hidden: true, frozen: frozenPIDs.contains(pid)))
+            victims.append(FrozenPidStore.Victim(
+                pid: Int(pid),
+                hidden: true,
+                frozen: frozenPIDs.contains(pid),
+                bundleID: victimBundles[pid]
+            ))
         }
         if victims.isEmpty {
             frozenStore.clear()
@@ -555,7 +632,13 @@ final class AppEnforcer: LockListener {
     private func thawOnLaunch() {
         let victims = frozenStore.read()
         guard !victims.isEmpty else { return }
-        let alive = victims.filter { process.isRunning(pid: pid_t($0.pid)) }
+        let alive = victims.filter { victim in
+            let pid = pid_t(victim.pid)
+            guard process.isRunning(pid: pid) else { return false }
+            // Older stores have no bundle: trust the pid, as before.
+            guard let recorded = victim.bundleID else { return true }
+            return process.bundleID(of: pid) == recorded
+        }
         guard !alive.isEmpty else {
             frozenStore.clear()
             return

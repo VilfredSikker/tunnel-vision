@@ -30,6 +30,12 @@ final class FakeWindowManager: WindowManaging {
     func observe(pid: pid_t, onChange: @escaping @MainActor () -> Void) { observed.insert(pid) }
     func stopObserving(pid: pid_t) { observed.remove(pid) }
 
+    var onWindowsChanged: ((pid_t) -> Void)?
+    var forgotten: [pid_t] = []
+    var drained = 0
+    func forget(pid: pid_t) { forgotten.append(pid) }
+    func drainWrites(timeout: TimeInterval) { drained += 1 }
+
     // MARK: Helpers
 
     func launch(_ bundleID: String, name: String, pid: pid_t) {
@@ -201,6 +207,107 @@ final class WindowEnforcerTests: XCTestCase {
         let enforcer = makeEnforcer(fake)
         enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
         XCTAssertFalse(enforcer.isActive, "a window rule falls back to allowing the whole app")
+        XCTAssertTrue(fake.calls.isEmpty)
+    }
+
+    /// Before: missing Accessibility only reached the log, so the lock
+    /// looked real. Now it is reported, and granting it mid-session takes
+    /// effect without a relock.
+    func testMissingAccessibilityIsReportedAndPickedUpOnceGranted() {
+        let fake = xcodeWorld()
+        fake.trusted = false
+        let enforcer = makeEnforcer(fake)
+        var warnings: [String?] = []
+        enforcer.onWarning = { warnings.append($0) }
+
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertNotNil(warnings.last ?? nil)
+
+        enforcer.recheckTrust()
+        XCTAssertEqual(warnings.count, 1, "no repeat while nothing changed")
+
+        fake.trusted = true
+        enforcer.recheckTrust()
+        XCTAssertTrue(enforcer.isActive, "the waiting rules apply once Accessibility is granted")
+        XCTAssertTrue(fake.isMinimized(2, pid: 10))
+        XCTAssertEqual(warnings.count, 2)
+        XCTAssertNil(warnings.last ?? "still warning")
+    }
+
+    func testAccessibilityRevokedMidSessionIsReported() {
+        let fake = xcodeWorld()
+        let enforcer = makeEnforcer(fake)
+        var warnings: [String?] = []
+        enforcer.onWarning = { warnings.append($0) }
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        XCTAssertTrue(warnings.allSatisfy { $0 == nil })
+
+        fake.trusted = false
+        enforcer.recheckTrust()
+        XCTAssertNotNil(warnings.last ?? nil)
+
+        enforcer.unlock()
+        XCTAssertNil(warnings.last ?? "still warning", "no session, nothing to warn about")
+    }
+
+    /// The live manager answers from a cache and reads in the background;
+    /// when the fresh read lands, the app is judged again.
+    func testAFreshWindowReadIsJudgedWhenItLands() {
+        let fake = xcodeWorld()
+        let enforcer = makeEnforcer(fake)
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        XCTAssertEqual(fake.minimised, [2])
+
+        fake.addWindow(3, pid: 10, title: "Scratch — notes.txt")
+        fake.onWindowsChanged?(10)
+        XCTAssertEqual(fake.minimised, [2, 3], "the manager's change callback reaches the enforcer")
+    }
+
+    /// Restores go to every window this layer minimised, even when the last
+    /// read shows it as up: that read may be stale.
+    func testUnlockRestoresWhatItMinimisedEvenIfTheReadLooksRestored() {
+        let fake = xcodeWorld()
+        let enforcer = makeEnforcer(fake)
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        XCTAssertTrue(fake.isMinimized(2, pid: 10))
+
+        // A stale snapshot: the window reads as up though it is minimised.
+        fake.windowsByPID[10] = fake.windowsByPID[10]?.map {
+            AXWindowSnapshot(id: $0.id, title: $0.title, isMinimized: false, isStandard: $0.isStandard)
+        }
+        enforcer.unlock()
+        XCTAssertEqual(fake.restored, [2])
+    }
+
+    func testDrainReachesTheManager() {
+        let fake = xcodeWorld()
+        let enforcer = makeEnforcer(fake)
+        enforcer.drainWrites(timeout: 1)
+        XCTAssertEqual(fake.drained, 1)
+    }
+
+    func testHoldLeavesWindowsUpUntilReleased() {
+        let fake = xcodeWorld()
+        let enforcer = makeEnforcer(fake)
+        enforcer.hold(true)
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        enforcer.sweepAll()
+        XCTAssertFalse(fake.isMinimized(2, pid: 10), "a window the user is about to pick stays up")
+
+        enforcer.hold(false)
+        XCTAssertTrue(fake.isMinimized(2, pid: 10))
+    }
+
+    func testUnlockDropsRulesWaitingForAccessibility() {
+        let fake = xcodeWorld()
+        fake.trusted = false
+        let enforcer = makeEnforcer(fake)
+        enforcer.lock(rules: [Rule(bundleID: xcode, scope: .window, pattern: "Anchor")])
+        enforcer.unlock()
+        fake.trusted = true
+        enforcer.recheckTrust()
+        XCTAssertFalse(enforcer.isActive, "a session that ended does not lock later")
         XCTAssertTrue(fake.calls.isEmpty)
     }
 

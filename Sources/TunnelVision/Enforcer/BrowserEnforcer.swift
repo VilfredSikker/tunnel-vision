@@ -258,13 +258,18 @@ final class BrowserEnforcer: LockListener {
     private var lastAllowedURL: [String: [Int: String]] = [:]
     private var pollTask: Task<Void, Never>?
     private var generation = 0
-    private var lastNoticeAt: [String: Date] = [:]
+    private var noticeThrottle = NoticeThrottle()
     private var unansweredBundles: Set<String> = []
 
     private(set) var isActive = false
 
     /// A page was steered away: (browser name, bundle id, site host).
     var onBlockedSite: ((_ appName: String, _ bundleID: String, _ host: String) -> Void)?
+
+    /// Browsers whose site rules cannot be enforced (a message), or all
+    /// enforced again (nil). Called on changes only.
+    var onWarning: ((String?) -> Void)?
+    private var warning: String?
 
     init(
         scripting: BrowserScripting = AppleScriptBrowserScripting(),
@@ -299,6 +304,8 @@ final class BrowserEnforcer: LockListener {
             lastAllowedURL[bundle] = nil
         }
         ruleSets = next
+        unansweredBundles.formIntersection(next.keys)
+        reportUnanswered()
         isActive = true
         generation += 1
         Self.log.info("browser lock: \(next.keys.sorted().joined(separator: ", "), privacy: .public)")
@@ -317,8 +324,22 @@ final class BrowserEnforcer: LockListener {
         ruleSets = [:]
         sessionSites = [:]
         lastAllowedURL = [:]
-        lastNoticeAt = [:]
+        noticeThrottle.reset()
         unansweredBundles = []
+        reportUnanswered()
+    }
+
+    private func reportUnanswered() {
+        let message: String?
+        if unansweredBundles.isEmpty {
+            message = nil
+        } else {
+            let names = unansweredBundles.sorted().map(scripting.displayName(of:)).joined(separator: ", ")
+            message = "Site rules are off in \(names): it does not answer Tunnel Vision. Allow it under System Settings → Privacy & Security → Automation."
+        }
+        guard message != warning else { return }
+        warning = message
+        onWarning?(message)
     }
 
     /// "Allow for this session" from the notice: the site joins the
@@ -346,13 +367,17 @@ final class BrowserEnforcer: LockListener {
         for bundle in ruleSets.keys.sorted() where scripting.isRunning(bundle) {
             guard let ruleSet = effectiveRuleSet(for: bundle) else { continue }
             guard let windows = await scripting.windows(of: bundle) else {
+                guard isActive, generation == current else { return }
                 if unansweredBundles.insert(bundle).inserted {
                     Self.log.info("\(bundle, privacy: .public) did not answer — Automation declined, or the browser is busy")
+                    reportUnanswered()
                 }
                 continue
             }
             guard isActive, generation == current else { return }
-            unansweredBundles.remove(bundle)
+            if unansweredBundles.remove(bundle) != nil {
+                reportUnanswered()
+            }
             for window in windows {
                 await judge(window, bundle: bundle, ruleSet: ruleSet)
                 guard isActive, generation == current else { return }
@@ -386,10 +411,7 @@ final class BrowserEnforcer: LockListener {
     }
 
     private func notifyBlocked(bundle: String, host: String) {
-        let key = bundle + "|" + host
-        let now = Date()
-        if let last = lastNoticeAt[key], now.timeIntervalSince(last) < 4 { return }
-        lastNoticeAt[key] = now
+        guard noticeThrottle.allow(bundle + "|" + host) else { return }
         onBlockedSite?(scripting.displayName(of: bundle), bundle, host)
     }
 

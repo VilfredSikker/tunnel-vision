@@ -22,7 +22,14 @@ final class HerdrWorkspaceGuard: LockListener {
     private var labelsByID: [String: String] = [:]
     private var orderedIDs: [String] = []
     private var eventTask: Task<Void, Never>?
-    private var lastNoticeAt: Date?
+    private var noticeThrottle = NoticeThrottle()
+    private var warning: String?
+
+    static let unreachableWarning = "herdr workspace rules are off: herdr is not reachable. Tunnel Vision keeps trying while the session runs."
+
+    /// herdr cannot be reached for a running lock (a message), or can
+    /// again (nil). Called on changes only.
+    var onWarning: ((String?) -> Void)?
 
     init(client: HerdrControlling, taskTitle: @escaping () -> String) {
         self.client = client
@@ -57,9 +64,10 @@ final class HerdrWorkspaceGuard: LockListener {
     func activate(labels: Set<String>) {
         if isActive, labels == allowedLabels { return }
         deactivate()
-        guard client.isAvailable else {
-            Self.log.info("herdr socket not present — workspace lock inactive")
-            return
+        // Locked even without a socket: herdr may start later in the
+        // session, and the run loop retries until it answers.
+        if !client.isAvailable {
+            Self.log.info("herdr socket not present yet — retrying while locked")
         }
         setAllowedLabels(labels)
         Self.log.info("locking to herdr workspaces: \(labels.sorted().joined(separator: ", "), privacy: .public)")
@@ -83,26 +91,47 @@ final class HerdrWorkspaceGuard: LockListener {
         labelsByID = [:]
         orderedIDs = []
         returnTarget = nil
+        report(nil)
     }
 
     /// Bootstrap, then follow events; reconnects with backoff while locked.
     private func run() async {
         var backoff: Duration = .seconds(1)
         while isActive, !Task.isCancelled {
-            do {
-                try await bootstrap()
+            if await connectOnce() {
                 backoff = .seconds(1)
-                for await event in client.events() {
-                    guard isActive else { return }
-                    await handle(event)
-                }
-            } catch {
-                Self.log.info("herdr unavailable: \(String(describing: error), privacy: .public)")
             }
             guard isActive, !Task.isCancelled else { return }
             try? await Task.sleep(for: backoff)
             backoff = min(backoff * 2, .seconds(30))
         }
+    }
+
+    /// One connection: bootstrap, then follow events until the stream
+    /// ends. False when herdr could not be reached (internal for tests).
+    @discardableResult
+    func connectOnce() async -> Bool {
+        do {
+            try await bootstrap()
+        } catch {
+            Self.log.info("herdr unavailable: \(String(describing: error), privacy: .public)")
+            if isActive {
+                report(Self.unreachableWarning)
+            }
+            return false
+        }
+        report(nil)
+        for await event in client.events() {
+            guard isActive else { break }
+            await handle(event)
+        }
+        return true
+    }
+
+    private func report(_ message: String?) {
+        guard message != warning else { return }
+        warning = message
+        onWarning?(message)
     }
 
     /// Reads the current state and bounces immediately if the user is
@@ -173,9 +202,7 @@ final class HerdrWorkspaceGuard: LockListener {
     }
 
     private func notifyBounce(to label: String) async {
-        let now = Date()
-        if let last = lastNoticeAt, now.timeIntervalSince(last) < 4 { return }
-        lastNoticeAt = now
+        guard noticeThrottle.allow("herdr") else { return }
         await client.notify(
             title: "Tunnel Vision: locked to \"\(taskTitle())\"",
             body: "Back to \(label). Allowed workspaces: \(allowedLabels.sorted().joined(separator: ", "))"

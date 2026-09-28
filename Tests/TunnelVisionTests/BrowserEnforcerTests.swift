@@ -174,6 +174,35 @@ final class BrowserEnforcerTests: XCTestCase {
         XCTAssertTrue(fake.navigated.isEmpty, "Automation declined: nothing to do")
     }
 
+    /// Before: a browser that never answered only reached the log. Now the
+    /// user is told its site rules are not being enforced, and told again
+    /// when it answers.
+    func testABrowserThatDoesNotAnswerIsReported() async {
+        let fake = FakeBrowserScripting()
+        fake.running = [helium]
+        fake.answers = false
+        let enforcer = makeEnforcer(fake)
+        var warnings: [String?] = []
+        enforcer.onWarning = { warnings.append($0) }
+        enforcer.lock(rules: [Rule(bundleID: helium, scope: .url, pattern: "github.com")])
+
+        await enforcer.sweep()
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue((warnings.last ?? nil)?.contains("Helium") ?? false)
+        await enforcer.sweep()
+        XCTAssertEqual(warnings.count, 1, "no repeat while nothing changed")
+
+        fake.answers = true
+        await enforcer.sweep()
+        XCTAssertEqual(warnings.count, 2)
+        XCTAssertNil(warnings.last ?? "still warning")
+
+        fake.answers = false
+        await enforcer.sweep()
+        enforcer.unlock()
+        XCTAssertNil(warnings.last ?? "still warning", "unlock clears it")
+    }
+
     func testAllowForSessionWidensThePatterns() async {
         let fake = FakeBrowserScripting()
         fake.running = [helium]
