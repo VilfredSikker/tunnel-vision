@@ -13,7 +13,7 @@ public enum ControlTools {
         ),
         MCPTool(
             name: "tunnelvision_list_tasks",
-            description: "List the tasks in order with id, title, duration, preset, allowlist rules, whether each was done on the day, and whether it repeats daily (today unless `day` is given as yyyy-MM-dd).",
+            description: "List the tasks in order with id, title, duration, preset, allowlist rules, whether each was done on the day, whether it is open (on the day's list, as the app shows it; a one-off checked off on an earlier day is not), and whether it repeats daily (today unless `day` is given as yyyy-MM-dd).",
             inputSchema: object(["day": string("Day key yyyy-MM-dd; defaults to today")])
         ),
         MCPTool(

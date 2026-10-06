@@ -71,6 +71,30 @@ final class ControlAPITests: XCTestCase {
         XCTAssertTrue(model.tasks.isEmpty)
     }
 
+    /// `open` is what the panel lists under today: a one-off checked off on
+    /// an earlier day is retired, a repeating one comes back.
+    func testTaskListMarksWhatThePanelShowsAsOpen() throws {
+        let fresh = task(try call("tasks.add", ["title": "Fresh"]))["id"] as! String
+        let oneOff = task(try call("tasks.add", ["title": "One-off"]))["id"] as! String
+        let daily = task(try call("tasks.add", ["title": "Daily", "repeat_daily": true]))["id"] as! String
+        _ = try call("tasks.set_done", ["id": oneOff])
+        _ = try call("tasks.set_done", ["id": daily])
+        now = now.addingTimeInterval(24 * 60 * 60)
+
+        let tasks = try call("tasks.list")["tasks"] as? [[String: Any]] ?? []
+        func isOpen(_ id: String) -> Bool? {
+            tasks.first { $0["id"] as? String == id }?["open"] as? Bool
+        }
+        XCTAssertEqual(isOpen(fresh), true)
+        XCTAssertEqual(isOpen(oneOff), false, "done yesterday: retired")
+        XCTAssertEqual(isOpen(daily), true, "repeats: back today")
+        XCTAssertEqual(
+            tasks.filter { $0["open"] as? Bool == true }.map { $0["id"] as? String },
+            model.openTasks(on: model.todayKey).map(\.id.uuidString),
+            "the same set the panel lists"
+        )
+    }
+
     func testRulesResolveAppNamesAndRejectIncompleteOnes() throws {
         let added = task(try call("tasks.add", [
             "title": "Browse",

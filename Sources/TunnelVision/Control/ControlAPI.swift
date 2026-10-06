@@ -321,6 +321,8 @@ final class ControlAPI {
             "rules": task.overrides.map(ruleJSON),
             "effective_rules": model.effectiveRules(for: task).map(ruleJSON),
             "done": task.isDone(on: day),
+            // On the day's open list, as the panel shows it.
+            "open": model.isOpen(task, on: day),
             "repeat_daily": task.repeatDaily,
             "active": task.id == model.activeTaskID,
         ]

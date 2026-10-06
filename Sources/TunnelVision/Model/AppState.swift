@@ -366,12 +366,11 @@ final class AppState {
     /// one-off is retired from the day after its check-off; a repeating task
     /// is never retired, so it stays on the list even when checked off today.
     func openTasks(on day: String) -> [TaskItem] {
-        tasks.filter { task in
-            if task.isDone(on: day) {
-                return task.repeatDaily
-            }
-            return !task.isRetired(by: day)
-        }
+        tasks.filter { isOpen($0, on: day) }
+    }
+
+    func isOpen(_ task: TaskItem, on day: String) -> Bool {
+        task.isDone(on: day) ? task.repeatDaily : !task.isRetired(by: day)
     }
 
     /// Applies a sort to a list of open tasks. Done tasks stay
