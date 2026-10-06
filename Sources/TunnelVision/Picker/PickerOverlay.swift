@@ -41,15 +41,37 @@ final class PickerOverlayModel {
         self.herdrLabels = herdrLabels
         self.mode = mode
         self.allowsPresetSave = allowsPresetSave
+        self.keptListedBundles = wholeAppBundles
     }
 
     var anyTitlesAvailable: Bool {
         apps.contains { app in app.windows.contains { $0.title != nil } }
     }
 
+    /// Running apps without a window are hidden by default: they crowd the
+    /// list and can only be picked whole.
+    var showsWindowlessApps = false
+
+    /// Apps allowed when the picker opened or toggled since. They stay listed
+    /// after a drop, so the row does not vanish under the click.
+    private var keptListedBundles: Set<String>
+
+    /// A windowless app is listed anyway when it is or was allowed (so it
+    /// can be dropped and re-added) or hosts herdr workspaces.
+    private func isListed(_ app: PickerAppInfo) -> Bool {
+        showsWindowlessApps || !app.windows.isEmpty || isWhole(app)
+            || keptListedBundles.contains(app.bundleID) || !herdrWorkspaces(hostedBy: app).isEmpty
+    }
+
+    /// How many windowless apps the list leaves out right now.
+    var hiddenWindowlessCount: Int {
+        apps.filter { !isListed($0) }.count
+    }
+
     var filteredApps: [PickerAppInfo] {
         let query = search.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !query.isEmpty else { return apps }
+        // A search names what it wants, windows or not.
+        guard !query.isEmpty else { return apps.filter(isListed) }
         return apps.compactMap { app in
             let appMatches = app.name.lowercased().contains(query)
                 || app.bundleID.lowercased().contains(query)
@@ -77,6 +99,7 @@ final class PickerOverlayModel {
     /// Click on the app header: include (or drop) the whole app. Window
     /// picks of that app become meaningless either way and are cleared.
     func toggleApp(_ app: PickerAppInfo) {
+        keptListedBundles.insert(app.bundleID)
         if wholeAppBundles.contains(app.bundleID) {
             wholeAppBundles.remove(app.bundleID)
         } else {
@@ -281,6 +304,15 @@ struct PickerOverlayView: View {
                             ForEach(model.filteredApps) { app in
                                 appSection(app)
                             }
+                            if model.search.trimmingCharacters(in: .whitespaces).isEmpty, model.hiddenWindowlessCount > 0 {
+                                let count = model.hiddenWindowlessCount
+                                Button("Show \(count) app\(count == 1 ? "" : "s") without windows") {
+                                    model.showsWindowlessApps = true
+                                }
+                                .buttonStyle(.link)
+                                .font(.caption)
+                                .padding(.horizontal, 4)
+                            }
                         }
                         .padding(24)
                     }
@@ -318,6 +350,11 @@ struct PickerOverlayView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 220)
             }
+            Toggle("Apps without windows", isOn: $model.showsWindowlessApps)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.caption)
+                .help("Also list running apps that have no open window; they can only be included whole")
             if !titlesAvailable {
                 Button {
                     onRequestTitles()
@@ -379,7 +416,7 @@ struct PickerOverlayView: View {
             .padding(.horizontal, 4)
 
             if app.windows.isEmpty {
-                Text("No on-screen windows")
+                Text("No open windows")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .padding(.horizontal, 4)

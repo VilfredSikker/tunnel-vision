@@ -100,7 +100,7 @@ public enum ControlTools {
         ),
         MCPTool(
             name: "tunnelvision_list_apps",
-            description: "Running apps with their bundle ids and on-screen window titles, for building allowlists. Rules also accept names of installed apps (looked up in /Applications) in place of bundle ids.",
+            description: "Running apps with their bundle ids and open window titles, for building allowlists. Rules also accept names of installed apps (looked up in /Applications) in place of bundle ids.",
             inputSchema: object([:])
         ),
     ] }

@@ -4,7 +4,7 @@ import XCTest
 @testable import TunnelVision
 
 /// The picker lists what Cmd-Tab and Mission Control list: regular apps,
-/// with their on-screen windows attached.
+/// with their open windows attached.
 final class WindowCatalogueTests: XCTestCase {
     private let selfPID: pid_t = 1
     private let slack = "com.tinyspeck.slackmacgap"
@@ -92,6 +92,34 @@ final class WindowCatalogueTests: XCTestCase {
         XCTAssertEqual(titles[1], "Engineering", "no Screen Recording: the AX title is used")
         XCTAssertEqual(titles[2], "Design", "a blank listed title counts as missing")
         XCTAssertEqual(titles[3], "Listed title", "a real listed title wins")
+    }
+
+    func testHiddenWindowsAccessibilityReportsAreListed() {
+        // A Dark session hides the browser: its windows leave the screen but
+        // must stay pickable. Helper windows that are never on screen and
+        // that Accessibility does not report stay out.
+        let browser = "com.google.Chrome"
+        let windows = [
+            WindowRecord(id: 1, ownerPID: 10, layer: 0, bounds: CGRect(x: 0, y: 0, width: 800, height: 600), title: nil, isOnScreen: false),
+            WindowRecord(id: 2, ownerPID: 10, layer: 0, bounds: CGRect(x: 0, y: 0, width: 800, height: 600), title: nil, isOnScreen: false),
+            window(3, owner: 10, title: "Visible"),
+        ]
+        let listed = WindowCatalogue.assemble(
+            apps: [app(10, browser, "Chrome")],
+            windows: windows,
+            extraTitles: [1: "Docs"],
+            accessibleWindowIDs: [1, 3],
+            selfPID: selfPID
+        )
+        let chromeWindows = listed.first?.windows ?? []
+        XCTAssertEqual(chromeWindows.map(\.id), [1, 3], "the hidden window is listed, the helper window is not")
+        XCTAssertEqual(chromeWindows.first?.title, "Docs")
+    }
+
+    func testOffScreenWindowsAreDroppedWithoutAccessibility() {
+        let record = WindowRecord(id: 1, ownerPID: 10, layer: 0, bounds: nil, title: "Hidden", isOnScreen: false)
+        let listed = WindowCatalogue.assemble(apps: [app(10, slack, "Slack")], windows: [record], selfPID: selfPID)
+        XCTAssertEqual(listed.first?.windows, [], "nothing tells a hidden window from a helper window")
     }
 
     func testWindowWithoutReportedBoundsIsKept() {

@@ -91,6 +91,53 @@ final class PickerSelectionTests: XCTestCase {
     }
 
     @MainActor
+    private func modelWithWindowlessApps(whole: Set<String> = []) -> PickerOverlayModel {
+        let windowless = ["com.apple.iCal": "Calendar", "com.todesktop.cursor": "Cursor"].map { bundle, name in
+            PickerAppInfo(id: bundle, pid: 30, name: name, bundleID: bundle, icon: nil, windows: [])
+        }
+        return PickerOverlayModel(
+            apps: fixtureApps() + windowless,
+            wholeAppBundles: whole,
+            windowIDs: [],
+            mode: .dark,
+            allowsPresetSave: true
+        )
+    }
+
+    @MainActor
+    func testAppsWithoutWindowsAreHiddenByDefault() {
+        let model = modelWithWindowlessApps()
+        XCTAssertEqual(Set(model.filteredApps.map(\.bundleID)), [slack, xcode])
+        XCTAssertEqual(model.hiddenWindowlessCount, 2)
+
+        model.showsWindowlessApps = true
+        XCTAssertEqual(model.filteredApps.count, 4, "the toggle lists them again")
+        XCTAssertEqual(model.hiddenWindowlessCount, 0)
+    }
+
+    @MainActor
+    func testAllowedWindowlessAppStaysListed() {
+        let model = modelWithWindowlessApps(whole: ["com.apple.iCal"])
+        XCTAssertTrue(model.filteredApps.contains { $0.bundleID == "com.apple.iCal" }, "an allowed app must stay visible so it can be dropped")
+        XCTAssertFalse(model.filteredApps.contains { $0.bundleID == "com.todesktop.cursor" })
+    }
+
+    @MainActor
+    func testDroppedWindowlessAppStaysListed() {
+        let model = modelWithWindowlessApps(whole: ["com.apple.iCal"])
+        let calendar = model.filteredApps.first { $0.bundleID == "com.apple.iCal" }!
+        model.toggleApp(calendar)
+        XCTAssertTrue(model.filteredApps.contains { $0.bundleID == "com.apple.iCal" }, "a drop must not hide the row, so it can be undone in place")
+    }
+
+    @MainActor
+    func testSearchFindsWindowlessApps() {
+        let model = modelWithWindowlessApps()
+        model.search = "calen"
+        XCTAssertEqual(model.filteredApps.map(\.bundleID), ["com.apple.iCal"])
+    }
+
+    @MainActor
     func testNarrowingToTitlelessWindowIsRefused() {
         let model = makeModel(whole: [slack])
         let slackApp = model.apps.first { $0.bundleID == slack }!

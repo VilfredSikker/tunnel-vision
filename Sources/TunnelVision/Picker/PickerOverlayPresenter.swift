@@ -50,7 +50,7 @@ final class PickerOverlayPresenter {
         request += 1
         let thisRequest = request
         Task { @MainActor [weak self] in
-            let apps = await WindowCatalogue.onScreenAppsLoadingTitles()
+            let apps = await WindowCatalogue.openAppsLoadingTitles()
             // Cancelled meanwhile, or superseded by a later request.
             guard let self, self.loading, self.request == thisRequest else { return }
             self.loading = false

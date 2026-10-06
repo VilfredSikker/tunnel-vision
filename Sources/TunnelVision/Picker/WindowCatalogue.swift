@@ -47,50 +47,64 @@ enum AccessibilityPermission {
 func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: inout CGWindowID) -> AXError
 
 enum AccessibilityTitles {
-    /// Titles of the given apps' windows keyed by CGWindowID; empty without
-    /// the permission. A busy or frozen app is skipped after a short timeout
-    /// instead of stalling the picker. The apps are asked in parallel, about
-    /// one per CPU core at a time, so timeouts add up per batch rather than
-    /// per app: in a Frozen session every stopped app runs into its timeout.
-    static func titles(forPIDs pids: [pid_t]) -> [CGWindowID: String] {
-        guard AXIsProcessTrusted() else { return [:] }
-        let collected = TitleCollector()
-        DispatchQueue.concurrentPerform(iterations: pids.count) { index in
-            collected.merge(titles(forPID: pids[index]))
+    /// The windows an app reports over Accessibility: its real document
+    /// windows, including minimised ones and those of a hidden app.
+    struct Found: Sendable {
+        var windowIDs: Set<CGWindowID> = []
+        /// Keyed by CGWindowID; untitled windows have no entry.
+        var titles: [CGWindowID: String] = [:]
+
+        mutating func merge(_ other: Found) {
+            windowIDs.formUnion(other.windowIDs)
+            titles.merge(other.titles) { first, _ in first }
         }
-        return collected.titles
     }
 
-    private static func titles(forPID pid: pid_t) -> [CGWindowID: String] {
+    /// The given apps' windows; empty without the permission. A busy or
+    /// frozen app is skipped after a short timeout instead of stalling the
+    /// picker. The apps are asked in parallel, about one per CPU core at a
+    /// time, so timeouts add up per batch rather than per app: in a Frozen
+    /// session every stopped app runs into its timeout.
+    static func windows(forPIDs pids: [pid_t]) -> Found {
+        guard AXIsProcessTrusted() else { return Found() }
+        let collected = Collector()
+        DispatchQueue.concurrentPerform(iterations: pids.count) { index in
+            collected.merge(windows(forPID: pids[index]))
+        }
+        return collected.found
+    }
+
+    private static func windows(forPID pid: pid_t) -> Found {
         let application = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(application, 0.25)
         var windowsValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &windowsValue) == .success,
-              let windows = windowsValue as? [AXUIElement] else { return [:] }
-        var titles: [CGWindowID: String] = [:]
+              let windows = windowsValue as? [AXUIElement] else { return Found() }
+        var found = Found()
         for window in windows {
             AXUIElementSetMessagingTimeout(window, 0.25)
             var windowID: CGWindowID = 0
             guard _AXUIElementGetWindow(window, &windowID) == .success, windowID != 0 else { continue }
+            found.windowIDs.insert(windowID)
             var titleValue: CFTypeRef?
             guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success,
                   let title = (titleValue as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !title.isEmpty else { continue }
-            titles[windowID] = title
+            found.titles[windowID] = title
         }
-        return titles
+        return found
     }
 
     /// Gathers per-app results from the concurrent readers.
-    private final class TitleCollector: @unchecked Sendable {
+    private final class Collector: @unchecked Sendable {
         private let lock = NSLock()
-        private var gathered: [CGWindowID: String] = [:]
+        private var gathered = Found()
 
-        func merge(_ found: [CGWindowID: String]) {
-            lock.withLock { gathered.merge(found) { first, _ in first } }
+        func merge(_ other: Found) {
+            lock.withLock { gathered.merge(other) }
         }
 
-        var titles: [CGWindowID: String] {
+        var found: Found {
             lock.withLock { gathered }
         }
     }
@@ -166,10 +180,13 @@ struct WindowRecord: Sendable {
     /// Nil when the window server did not report bounds.
     let bounds: CGRect?
     let title: String?
+    /// False for windows of a hidden app, minimised windows, windows on
+    /// other Spaces — and the invisible helper windows many apps keep.
+    var isOnScreen = true
 }
 
 /// Lists the apps Cmd-Tab and Mission Control would show — regular
-/// (Dock-visible) apps — each with its on-screen windows. Window info comes
+/// (Dock-visible) apps — each with its open windows. Window info comes
 /// from CGWindowList (no permission needed for owners and counts); apps are
 /// resolved through NSWorkspace so picks can become rules.
 @MainActor
@@ -177,37 +194,57 @@ enum WindowCatalogue {
     /// Anything smaller is a menu leftover, tooltip or palette scrap.
     private nonisolated static let minimumWindowSize = CGSize(width: 80, height: 50)
 
-    /// Synchronous, for the control API's one-shot listing.
-    static func onScreenApps() -> [PickerAppInfo] {
+    /// Synchronous, for the control API's one-shot listing. It runs on the
+    /// main thread, so Accessibility is asked only when titles need it (no
+    /// Screen Recording); with Screen Recording, hidden windows are left out
+    /// rather than stalling on every app to tell them apart.
+    static func openApps() -> [PickerAppInfo] {
         let apps = runningAppRecords()
         let selfPID = ProcessInfo.processInfo.processIdentifier
-        // CGWindowList carries titles only with Screen Recording; otherwise
-        // the Accessibility API supplies them per window id.
-        var extraTitles: [CGWindowID: String] = [:]
-        if !ScreenCapturePermission.isAllowed {
-            extraTitles = AccessibilityTitles.titles(forPIDs: titlePIDs(apps, selfPID: selfPID))
-        }
-        return assemble(apps: apps, windows: onScreenWindows(), extraTitles: extraTitles, selfPID: selfPID)
+        let windows = allWindows()
+        let pids = ScreenCapturePermission.isAllowed ? [] : accessibilityPIDs(apps, windows: windows, selfPID: selfPID)
+        let found = AccessibilityTitles.windows(forPIDs: pids)
+        return assemble(
+            apps: apps,
+            windows: windows,
+            extraTitles: found.titles,
+            accessibleWindowIDs: found.windowIDs,
+            selfPID: selfPID
+        )
     }
 
-    /// For the picker: the Accessibility titles are read off the main
-    /// thread, so opening it never waits on a busy or frozen app there.
-    static func onScreenAppsLoadingTitles() async -> [PickerAppInfo] {
+    /// For the picker: Accessibility is read off the main thread, so
+    /// opening it never waits on a busy or frozen app there.
+    static func openAppsLoadingTitles() async -> [PickerAppInfo] {
         let apps = runningAppRecords()
         let selfPID = ProcessInfo.processInfo.processIdentifier
-        let windows = onScreenWindows()
-        var extraTitles: [CGWindowID: String] = [:]
-        if !ScreenCapturePermission.isAllowed {
-            let pids = titlePIDs(apps, selfPID: selfPID)
-            extraTitles = await Task.detached(priority: .userInitiated) {
-                AccessibilityTitles.titles(forPIDs: pids)
-            }.value
-        }
-        return assemble(apps: apps, windows: windows, extraTitles: extraTitles, selfPID: selfPID)
+        let windows = allWindows()
+        let pids = accessibilityPIDs(apps, windows: windows, selfPID: selfPID)
+        let found = await Task.detached(priority: .userInitiated) {
+            AccessibilityTitles.windows(forPIDs: pids)
+        }.value
+        return assemble(
+            apps: apps,
+            windows: windows,
+            extraTitles: found.titles,
+            accessibleWindowIDs: found.windowIDs,
+            selfPID: selfPID
+        )
     }
 
-    private static func titlePIDs(_ apps: [RunningAppRecord], selfPID: pid_t) -> [pid_t] {
-        apps.filter { $0.activationPolicy == .regular && $0.pid != selfPID }.map(\.pid)
+    /// The apps to ask over Accessibility. CGWindowList carries titles only
+    /// with Screen Recording, so without it every app is asked. With it, only
+    /// apps with off-screen windows are, to tell their real windows apart.
+    private static func accessibilityPIDs(_ apps: [RunningAppRecord], windows: [WindowRecord], selfPID: pid_t) -> [pid_t] {
+        let regular = apps.filter { $0.activationPolicy == .regular && $0.pid != selfPID }.map(\.pid)
+        guard ScreenCapturePermission.isAllowed else { return regular }
+        // Windows `assemble` drops for size never need telling apart.
+        let offScreenOwners = Set(windows.filter { window in
+            guard !window.isOnScreen, window.layer == 0 else { return false }
+            guard let bounds = window.bounds else { return true }
+            return bounds.width >= minimumWindowSize.width && bounds.height >= minimumWindowSize.height
+        }.map(\.ownerPID))
+        return regular.filter(offScreenOwners.contains)
     }
 
     private static func runningAppRecords() -> [RunningAppRecord] {
@@ -225,18 +262,26 @@ enum WindowCatalogue {
     /// Pure grouping and filtering. Only regular apps other than ourselves
     /// are listed — background agents, menu-bar helpers and system UI never
     /// appear in Cmd-Tab and cannot be picked here either. A regular app with
-    /// no window on this Space (hidden, minimised, elsewhere) is still listed
-    /// so it can be allowed as a whole app. `extraTitles` fills in titles the
-    /// window list did not carry (Accessibility, keyed by window id).
+    /// no window at all is still listed so it can be allowed as a whole app.
+    /// `extraTitles` fills in titles the window list did not carry
+    /// (Accessibility, keyed by window id).
+    ///
+    /// Windows a running session hid or minimised are off screen but still
+    /// pickable. Off screen, the window list also carries helper windows
+    /// nobody ever sees, so an off-screen window is listed only when
+    /// Accessibility reports it among the app's windows
+    /// (`accessibleWindowIDs`).
     nonisolated static func assemble(
         apps: [RunningAppRecord],
         windows: [WindowRecord],
         extraTitles: [CGWindowID: String] = [:],
+        accessibleWindowIDs: Set<CGWindowID> = [],
         selfPID: pid_t
     ) -> [PickerAppInfo] {
         var windowsByPID: [pid_t: [PickerWindowInfo]] = [:]
         for window in windows {
             guard window.layer == 0, window.ownerPID > 0 else { continue }
+            guard window.isOnScreen || accessibleWindowIDs.contains(window.id) else { continue }
             if let bounds = window.bounds,
                bounds.width < minimumWindowSize.width || bounds.height < minimumWindowSize.height {
                 continue
@@ -278,8 +323,9 @@ enum WindowCatalogue {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    private static func onScreenWindows() -> [WindowRecord] {
-        guard let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+    /// On-screen and off-screen windows alike; `assemble` sorts them out.
+    private static func allWindows() -> [WindowRecord] {
+        guard let raw = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] else { return [] }
         return raw.compactMap { info in
             guard let number = info[kCGWindowNumber as String] as? CGWindowID,
@@ -291,7 +337,8 @@ enum WindowCatalogue {
                 ownerPID: ownerPID,
                 layer: info[kCGWindowLayer as String] as? Int ?? -1,
                 bounds: bounds,
-                title: info[kCGWindowName as String] as? String
+                title: info[kCGWindowName as String] as? String,
+                isOnScreen: info[kCGWindowIsOnscreen as String] as? Bool ?? false
             )
         }
     }

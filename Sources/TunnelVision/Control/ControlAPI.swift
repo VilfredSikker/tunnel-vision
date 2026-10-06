@@ -158,7 +158,7 @@ final class ControlAPI {
             return ["state": stateJSON()]
 
         case "apps.list":
-            return ["apps": WindowCatalogue.onScreenApps().map { app in
+            return ["apps": WindowCatalogue.openApps().map { app in
                 [
                     "name": app.name,
                     "bundle_id": app.bundleID,
