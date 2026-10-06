@@ -4,7 +4,7 @@ import os
 import TunnelVisionControlKit
 
 /// Phase of the session state machine.
-enum SessionPhase: Equatable, Sendable {
+enum SessionPhase: String, Codable, Equatable, Sendable {
     case idle
     case work
     case paused
@@ -16,7 +16,7 @@ enum SessionPhase: Equatable, Sendable {
 /// done) are not announced: they already know.
 enum PhaseAlert: Equatable, Sendable {
     /// Work time ran out; the break has begun.
-    case workEnded(taskTitle: String, breakSeconds: TimeInterval)
+    case workEnded(taskTitle: String, breakSeconds: TimeInterval, isLong: Bool = false)
     /// The break ran out; nothing is locked until the next start. The next
     /// task is fixed here so the popup starts the task it names, even if
     /// the list changes while it is up.
@@ -134,10 +134,21 @@ final class AppState {
     private var growthBaseElapsed: TimeInterval = 0
     /// When the break ends (phase == .breakTime).
     private var breakEndsAt: Date?
+    /// The running break is the long one (phase == .breakTime).
+    private(set) var isLongBreak = false
+    /// Sessions finished in a row since the last long break. An early stop
+    /// or a new day starts the row over.
+    private(set) var sessionsInARow = 0
+    /// When the current work run started, for its history record.
+    private var sessionStartedAt: Date?
+
+    /// Every ended work run, oldest first.
+    private(set) var history: [SessionRecord] = []
 
     // MARK: Machinery
 
     private let fileURL: URL
+    private let historyLog: HistoryLog
     private let clock: () -> Date
     private var tickTask: Task<Void, Never>?
     private let tickInterval: TimeInterval = 0.5
@@ -155,7 +166,9 @@ final class AppState {
         // Every Tunnel Vision installation on this machine shares this file.
         // Renaming the support directory orphans existing data.
         self.fileURL = fileURL ?? AppIdentity.supportDirectory.appendingPathComponent("data.json")
+        self.historyLog = HistoryLog(fileURL: self.fileURL.deletingLastPathComponent().appendingPathComponent("history.jsonl"))
         self.clock = clock
+        history = historyLog.load()
         loadOrSeed()
         if autoTick {
             startLoop()
@@ -556,11 +569,13 @@ final class AppState {
         guard phase != .work, phase != .paused else { return }
         if phase == .breakTime {
             breakEndsAt = nil
+            isLongBreak = false
         }
         activeTaskID = task.id
         nextTaskID = nil
         workTotal = max(1, task.durationSeconds)
         workEndsAt = clock().addingTimeInterval(workTotal)
+        sessionStartedAt = clock()
         growth = GrowthPlan(startedAt: clock(), durationSeconds: workTotal)
         growthBaseProgress = 0
         growthBaseElapsed = 0
@@ -719,7 +734,9 @@ final class AppState {
     func stopNow() {
         guard phase == .work || phase == .paused else { return }
         recordGrowth()
+        recordHistory(.stopped)
         phase = .idle
+        sessionsInARow = 0
         clearRun()
         persist()
         Self.log.info("session stopped early")
@@ -742,12 +759,17 @@ final class AppState {
     func skipBreak() {
         guard phase == .breakTime else { return }
         phase = .idle
+        isLongBreak = false
         nextTaskID = nil
         phaseAlert = nil
         persist()
         Self.log.info("break skipped")
         notifyLockChange()
     }
+
+    /// How late a break end may be noticed and still start the next task by
+    /// itself.
+    static let autoStartGraceSeconds: TimeInterval = 60
 
     /// Backstop used by the tick loop; tests call it directly with a fake clock.
     func tick() {
@@ -763,14 +785,23 @@ final class AppState {
             if let endsAt = breakEndsAt, clock() >= endsAt {
                 let next = nextTask
                 phase = .idle
+                isLongBreak = false
                 nextTaskID = nil
-                phaseAlert = .breakEnded(nextTaskID: next?.id, nextTaskTitle: next?.title)
-                persist()
                 if settings.soundOn {
                     SoundPlayer.breakEnd()
                 }
                 Self.log.info("break ended")
-                notifyLockChange()
+                // Auto-start only a break that just ended: after the Mac
+                // slept through it, starting a lock the moment it wakes
+                // would ambush the user.
+                if settings.autoStartNextTask, let next,
+                   clock().timeIntervalSince(endsAt) <= Self.autoStartGraceSeconds {
+                    startTask(id: next.id)
+                } else {
+                    phaseAlert = .breakEnded(nextTaskID: next?.id, nextTaskTitle: next?.title)
+                    persist()
+                    notifyLockChange()
+                }
             }
         case .paused:
             if let pauseEndsAt, clock() >= pauseEndsAt {
@@ -791,8 +822,10 @@ final class AppState {
     private func completeWork(creditSession: Bool, announce: Bool = false) {
         let title = activeTask?.title ?? "Focus session"
         recordGrowth()
+        recordHistory(creditSession ? .completed : .skippedToBreak)
         if creditSession {
             todayCount += 1
+            sessionsInARow += 1
         }
         if let id = activeTaskID, let index = tasks.firstIndex(where: { $0.id == id }),
            creditSession {
@@ -802,9 +835,16 @@ final class AppState {
         // credited end that excludes the finished task, and after an early
         // skip-to-break it points back at the abandoned task itself.
         recomputeNextTask()
+        // Task, small break, task, small break, task, long break: the row
+        // that earns the long one starts over with it.
+        isLongBreak = creditSession && sessionsInARow >= max(1, settings.sessionsBeforeLongBreak)
+        if isLongBreak {
+            sessionsInARow = 0
+        }
+        let breakSeconds = max(1, isLongBreak ? settings.longBreakSeconds : settings.breakSeconds)
         phase = .breakTime
-        breakEndsAt = clock().addingTimeInterval(max(1, settings.breakSeconds))
-        phaseAlert = announce ? .workEnded(taskTitle: title, breakSeconds: max(1, settings.breakSeconds)) : nil
+        breakEndsAt = clock().addingTimeInterval(breakSeconds)
+        phaseAlert = announce ? .workEnded(taskTitle: title, breakSeconds: breakSeconds, isLong: isLongBreak) : nil
         clearRun()
         persist()
         if settings.soundOn {
@@ -821,6 +861,7 @@ final class AppState {
         pausedAt = nil
         pauseUsed = 0
         workTotal = 0
+        sessionStartedAt = nil
         growth = nil
         growthBaseProgress = 0
         growthBaseElapsed = 0
@@ -835,6 +876,31 @@ final class AppState {
         guard let growth else { return }
         guard workElapsedSeconds >= Self.gardenMinimumSeconds else { return }
         todayGarden.append(GrowthRecord(plan: growth, progress: growthProgress))
+    }
+
+    /// The ending run joins the history. Like `recordGrowth`, it runs while
+    /// elapsed time is still live. A completed run always counts, as it does
+    /// in the today count; an abandoned one only past the false-start length.
+    private func recordHistory(_ outcome: SessionRecord.Outcome) {
+        guard let startedAt = sessionStartedAt else { return }
+        let focus = workElapsedSeconds
+        guard outcome == .completed || focus >= Self.gardenMinimumSeconds else { return }
+        // A run the timer ended (possibly noticed late, after sleep) ended
+        // when its time was up.
+        var endedAt = clock()
+        if phase == .work, let workEndsAt {
+            endedAt = min(endedAt, workEndsAt)
+        }
+        let record = SessionRecord(
+            taskID: activeTaskID,
+            title: activeTask?.title ?? "Focus session",
+            startedAt: startedAt,
+            endedAt: endedAt,
+            focusSeconds: focus,
+            outcome: outcome
+        )
+        history.append(record)
+        historyLog.append(record)
     }
 
     private func rememberPreset(_ id: UUID?) {
@@ -949,9 +1015,85 @@ final class AppState {
         let key = todayKey
         if countDay != key {
             todayCount = 0
+            sessionsInARow = 0
             todayGarden = []
             countDay = key
         }
+    }
+
+    /// The engine state to save; nil when idle.
+    private var snapshot: SessionSnapshot? {
+        guard phase != .idle else { return nil }
+        return SessionSnapshot(
+            phase: phase,
+            activeTaskID: activeTaskID,
+            nextTaskID: nextTaskID,
+            startedAt: sessionStartedAt,
+            workEndsAt: workEndsAt,
+            pausedRemaining: pausedRemaining,
+            pausedAt: pausedAt,
+            pauseUsed: pauseUsed,
+            workTotal: workTotal,
+            growth: growth,
+            growthBaseProgress: growthBaseProgress,
+            growthBaseElapsed: growthBaseElapsed,
+            breakEndsAt: breakEndsAt,
+            isLongBreak: isLongBreak
+        )
+    }
+
+    /// Picks up the session that ran when the app last stopped (a crash, a
+    /// kill, a restart of the Mac). Whatever ran out while the app was not
+    /// running ends quietly, with no credit and no stretched pause. A run
+    /// with time left carries on, the time it was down included, as after
+    /// sleep. The app re-applies the lock once its
+    /// enforcers are wired. Runs before `normalizeDay`, so a row from an
+    /// earlier day still starts over.
+    private func restore(_ saved: SessionSnapshot?) {
+        guard let saved, saved.phase != .idle else { return }
+        let now = clock()
+        func lapsed(_ reason: String) {
+            // Like an early stop: no credit, and the row starts over.
+            sessionsInARow = 0
+            Self.log.info("restore: \(reason, privacy: .public) while closed, session dropped")
+        }
+        let taskExists = saved.activeTaskID.map { id in tasks.contains { $0.id == id } } ?? false
+        switch saved.phase {
+        case .work:
+            guard taskExists, let endsAt = saved.workEndsAt, now < endsAt else {
+                return lapsed("work ran out")
+            }
+        case .paused:
+            guard taskExists, saved.pausedRemaining != nil, let pausedAt = saved.pausedAt,
+                  now < pausedAt.addingTimeInterval(Self.maxPauseSeconds - saved.pauseUsed) else {
+                return lapsed("pause ran out")
+            }
+        case .breakTime:
+            guard let endsAt = saved.breakEndsAt, now < endsAt else {
+                Self.log.info("restore: break ran out while closed")
+                return
+            }
+        case .idle:
+            return
+        }
+        phase = saved.phase
+        activeTaskID = saved.activeTaskID
+        nextTaskID = saved.nextTaskID
+        sessionStartedAt = saved.startedAt
+        workEndsAt = saved.workEndsAt
+        pausedRemaining = saved.pausedRemaining
+        pausedAt = saved.pausedAt
+        pauseUsed = saved.pauseUsed
+        workTotal = saved.workTotal
+        growth = saved.growth
+        growthBaseProgress = saved.growthBaseProgress
+        growthBaseElapsed = saved.growthBaseElapsed
+        breakEndsAt = saved.breakEndsAt
+        isLongBreak = saved.isLongBreak
+        if phase == .breakTime {
+            recomputeNextTask()
+        }
+        Self.log.info("restore: \(saved.phase.rawValue, privacy: .public) picked up")
     }
 
     private func loadOrSeed() {
@@ -965,6 +1107,8 @@ final class AppState {
             todayCount = archive.todayCount
             countDay = archive.countDay
             todayGarden = archive.garden
+            sessionsInARow = archive.sessionsInARow
+            restore(archive.session)
             normalizeDay()
             ensureBuiltins()
             return
@@ -1022,7 +1166,9 @@ final class AppState {
                 countDay: countDay,
                 lastUsedPresetID: lastUsedPresetID,
                 removedBuiltinNames: [],
-                garden: todayGarden
+                garden: todayGarden,
+                session: snapshot,
+                sessionsInARow: sessionsInARow
             )
             let data = try encoder.encode(archive)
             try data.write(to: fileURL, options: .atomic)

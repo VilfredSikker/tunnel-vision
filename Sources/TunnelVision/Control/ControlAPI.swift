@@ -277,6 +277,9 @@ final class ControlAPI {
         if let remaining = model.remainingSeconds {
             state["remaining_seconds"] = remaining
         }
+        if model.phase == .breakTime {
+            state["long_break"] = model.isLongBreak
+        }
         if let active = model.activeTask {
             state["active_task"] = taskJSON(active, day: model.todayKey)
         }

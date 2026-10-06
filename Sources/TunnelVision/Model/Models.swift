@@ -301,8 +301,15 @@ enum CountdownStyle: String, Codable, CaseIterable, Identifiable, Sendable {
 struct Settings: Codable, Equatable, Sendable {
     /// Default work duration in seconds (25 minutes).
     var workSeconds: TimeInterval = 25 * 60
-    /// Default break duration in seconds (5 minutes).
+    /// Small break duration in seconds (5 minutes).
     var breakSeconds: TimeInterval = 5 * 60
+    /// Long break duration in seconds (20 minutes).
+    var longBreakSeconds: TimeInterval = 20 * 60
+    /// Sessions finished in a row that earn the long break instead of the
+    /// small one.
+    var sessionsBeforeLongBreak: Int = 3
+    /// When a break runs out, start the next task without waiting for a click.
+    var autoStartNextTask: Bool = false
     /// Strict mode: ending a session early requires typing the task title.
     var strictMode: Bool = false
     /// Default mode applied to new presets.
@@ -347,7 +354,7 @@ struct Settings: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case workSeconds, breakSeconds, strictMode, defaultMode, soundOn, toggleHotKey, newTaskHotKey, startPauseHotKey, pickerHotKey, pickWindowHotKey, showCountdownWindow, countdownStyle, unmanagedBrowsers, taskSort, onboardingDone
+        case workSeconds, breakSeconds, longBreakSeconds, sessionsBeforeLongBreak, autoStartNextTask, strictMode, defaultMode, soundOn, toggleHotKey, newTaskHotKey, startPauseHotKey, pickerHotKey, pickWindowHotKey, showCountdownWindow, countdownStyle, unmanagedBrowsers, taskSort, onboardingDone
     }
 }
 
@@ -360,6 +367,9 @@ extension Settings {
         let base = Settings()
         workSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .workSeconds) ?? base.workSeconds
         breakSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .breakSeconds) ?? base.breakSeconds
+        longBreakSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .longBreakSeconds) ?? base.longBreakSeconds
+        sessionsBeforeLongBreak = try container.decodeIfPresent(Int.self, forKey: .sessionsBeforeLongBreak) ?? base.sessionsBeforeLongBreak
+        autoStartNextTask = try container.decodeIfPresent(Bool.self, forKey: .autoStartNextTask) ?? base.autoStartNextTask
         strictMode = try container.decodeIfPresent(Bool.self, forKey: .strictMode) ?? base.strictMode
         defaultMode = try container.decodeIfPresent(Mode.self, forKey: .defaultMode) ?? base.defaultMode
         soundOn = try container.decodeIfPresent(Bool.self, forKey: .soundOn) ?? base.soundOn
@@ -420,12 +430,36 @@ struct Archive: Codable, Sendable {
     var removedBuiltinNames: [String] = []
     /// Plants of the sessions that ended on `countDay`, in order.
     var garden: [GrowthRecord] = []
+    /// The session or break running when this was written, so a crash or a
+    /// restart of the Mac picks it back up. Nil when idle.
+    var session: SessionSnapshot?
+    /// Sessions finished in a row on `countDay` since the last long break.
+    /// Kept outside `session`: the row lasts through idle time between tasks.
+    var sessionsInARow: Int = 0
 
     static let currentVersion = 1
 
     enum CodingKeys: String, CodingKey {
-        case version, tasks, presets, settings, todayCount, countDay, lastUsedPresetID, removedBuiltinNames, garden
+        case version, tasks, presets, settings, todayCount, countDay, lastUsedPresetID, removedBuiltinNames, garden, session, sessionsInARow
     }
+}
+
+/// The session engine's state, as saved between launches.
+struct SessionSnapshot: Codable, Equatable, Sendable {
+    var phase: SessionPhase
+    var activeTaskID: UUID?
+    var nextTaskID: UUID?
+    var startedAt: Date?
+    var workEndsAt: Date?
+    var pausedRemaining: TimeInterval?
+    var pausedAt: Date?
+    var pauseUsed: TimeInterval
+    var workTotal: TimeInterval
+    var growth: GrowthPlan?
+    var growthBaseProgress: Double
+    var growthBaseElapsed: TimeInterval
+    var breakEndsAt: Date?
+    var isLongBreak: Bool
 }
 
 extension Archive {
@@ -442,6 +476,9 @@ extension Archive {
         lastUsedPresetID = try container.decodeIfPresent(UUID.self, forKey: .lastUsedPresetID)
         removedBuiltinNames = try container.decodeIfPresent([String].self, forKey: .removedBuiltinNames) ?? []
         garden = try container.decodeIfPresent([GrowthRecord].self, forKey: .garden) ?? []
+        // A session that no longer reads is dropped, never the whole archive.
+        session = (try? container.decodeIfPresent(SessionSnapshot.self, forKey: .session)) ?? nil
+        sessionsInARow = try container.decodeIfPresent(Int.self, forKey: .sessionsInARow) ?? 0
     }
 }
 

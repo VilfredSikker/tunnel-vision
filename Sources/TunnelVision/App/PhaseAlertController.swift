@@ -151,15 +151,15 @@ private struct PhaseAlertView: View {
 
     private var headline: String {
         switch alert {
-        case .workEnded(let title, _): "Time’s up on “\(title)”"
+        case .workEnded(let title, _, _): "Time’s up on “\(title)”"
         case .breakEnded: "Break’s over"
         }
     }
 
     private var detail: String {
         switch alert {
-        case .workEnded(_, let seconds):
-            "Your \(TimeFormat.minutes(seconds)) break has started. Everything is unlocked."
+        case .workEnded(_, let seconds, let isLong):
+            "Your \(TimeFormat.minutes(seconds)) \(isLong ? "long break" : "break") has started. Everything is unlocked."
         case .breakEnded(_, let next):
             next.map { "Next up: \($0)" } ?? "Nothing left on today’s list."
         }

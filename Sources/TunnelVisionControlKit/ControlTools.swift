@@ -8,7 +8,7 @@ public enum ControlTools {
     public static var all: [MCPTool] { [
         MCPTool(
             name: "tunnelvision_state",
-            description: "Current session state of Tunnel Vision, the menu bar focus timer: phase (idle, work, paused, break), remaining seconds, the active task, the next task up (first still due today), today's day key and sessions completed today.",
+            description: "Current session state of Tunnel Vision, the menu bar focus timer: phase (idle, work, paused, break), remaining seconds, whether a break is the long one, the active task, the next task up (first still due today), today's day key and sessions completed today.",
             inputSchema: object([:])
         ),
         MCPTool(

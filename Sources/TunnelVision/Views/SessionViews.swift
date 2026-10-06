@@ -213,7 +213,7 @@ struct BreakHeader: View {
             Image(systemName: "cup.and.heat.waves.fill")
                 .font(.system(size: 22))
                 .foregroundStyle(.secondary)
-            Text("Break")
+            Text(model.isLongBreak ? "Long break" : "Break")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textCase(.uppercase)

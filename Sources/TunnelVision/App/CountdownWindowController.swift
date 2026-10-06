@@ -221,7 +221,7 @@ struct CountdownHUDView: View {
         case .idle: ""
         case .work: model.activeTask?.title ?? "Focus"
         case .paused: "Paused · \(model.activeTask?.title ?? "Focus")"
-        case .breakTime: "Break"
+        case .breakTime: model.isLongBreak ? "Long break" : "Break"
         }
     }
 }

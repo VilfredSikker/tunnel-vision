@@ -9,6 +9,9 @@ struct SettingsView: View {
 
     @State private var workMinutes: Int
     @State private var breakMinutes: Int
+    @State private var longBreakMinutes: Int
+    @State private var sessionsBeforeLongBreak: Int
+    @State private var autoStartNextTask: Bool
     @State private var defaultMode: Mode
     @State private var strictMode: Bool
     @State private var soundOn: Bool
@@ -29,6 +32,9 @@ struct SettingsView: View {
         let settings = model.settings
         _workMinutes = State(initialValue: Int(settings.workSeconds / 60))
         _breakMinutes = State(initialValue: Int(settings.breakSeconds / 60))
+        _longBreakMinutes = State(initialValue: Int(settings.longBreakSeconds / 60))
+        _sessionsBeforeLongBreak = State(initialValue: settings.sessionsBeforeLongBreak)
+        _autoStartNextTask = State(initialValue: settings.autoStartNextTask)
         _defaultMode = State(initialValue: settings.defaultMode)
         _strictMode = State(initialValue: settings.strictMode)
         _soundOn = State(initialValue: settings.soundOn)
@@ -58,9 +64,30 @@ struct SettingsView: View {
                     LabeledContent {
                         Text("\(breakMinutes) min").monospacedDigit()
                     } label: {
-                        Text("Default break")
+                        Text("Small break")
                     }
                 }
+                Stepper(value: $longBreakMinutes, in: 5...60, step: 5) {
+                    LabeledContent {
+                        Text("\(longBreakMinutes) min").monospacedDigit()
+                    } label: {
+                        Text("Long break")
+                    }
+                }
+                Stepper(value: $sessionsBeforeLongBreak, in: 2...8) {
+                    LabeledContent {
+                        Text("\(sessionsBeforeLongBreak) tasks").monospacedDigit()
+                    } label: {
+                        Text("Long break after")
+                    }
+                }
+                Text("Finishing this many tasks in a row earns the long break. Stopping a task early starts the count over.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Start the next task when a break ends", isOn: $autoStartNextTask)
+                Text("The next task up starts, and locks, as soon as the break runs out. Not after the Mac slept through the break's end.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Defaults") {
@@ -141,8 +168,10 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 440)
-        .onChange(of: workMinutes) { _, _ in apply() }
-        .onChange(of: breakMinutes) { _, _ in apply() }
+        // One observer for the durations: a modifier each makes the chain
+        // too long for the type checker.
+        .onChange(of: [workMinutes, breakMinutes, longBreakMinutes, sessionsBeforeLongBreak]) { _, _ in apply() }
+        .onChange(of: autoStartNextTask) { _, _ in apply() }
         .onChange(of: defaultMode) { _, _ in apply() }
         .onChange(of: strictMode) { _, _ in apply() }
         .onChange(of: soundOn) { _, _ in apply() }
@@ -244,6 +273,9 @@ struct SettingsView: View {
         var settings = model.settings
         settings.workSeconds = TimeInterval(workMinutes * 60)
         settings.breakSeconds = TimeInterval(breakMinutes * 60)
+        settings.longBreakSeconds = TimeInterval(longBreakMinutes * 60)
+        settings.sessionsBeforeLongBreak = sessionsBeforeLongBreak
+        settings.autoStartNextTask = autoStartNextTask
         settings.strictMode = strictMode
         settings.defaultMode = defaultMode
         settings.soundOn = soundOn

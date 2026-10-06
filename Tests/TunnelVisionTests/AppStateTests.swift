@@ -598,6 +598,77 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(opened.count, 1, "a task without a preset opens nothing")
     }
 
+    /// Task, small, task, small, task, long, then the cycle starts over.
+    func testEveryThirdSessionInARowEarnsTheLongBreak() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        var breaks: [Int?] = []
+        var longs: [Bool] = []
+        for _ in 0..<4 {
+            state.startTask(id: a.id)
+            state.finishTaskDone()
+            breaks.append(state.remainingSeconds)
+            longs.append(state.isLongBreak)
+            state.skipBreak()
+        }
+        XCTAssertEqual(breaks, [5 * 60, 5 * 60, 20 * 60, 5 * 60])
+        XCTAssertEqual(longs, [false, false, true, false])
+    }
+
+    func testTimedOutSessionsCountTowardTheLongBreakAndThePopupSaysSo() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        for _ in 0..<2 {
+            state.startTask(id: a.id)
+            state.finishTaskDone()
+            state.skipBreak()
+        }
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(26 * 60)
+        state.tick()
+        XCTAssertEqual(state.phaseAlert, .workEnded(taskTitle: "Deep work", breakSeconds: 20 * 60, isLong: true))
+    }
+
+    func testEarlyStopBreaksTheRow() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        for _ in 0..<2 {
+            state.startTask(id: a.id)
+            state.finishTaskDone()
+            state.skipBreak()
+        }
+        state.startTask(id: a.id)
+        state.stopNow()
+        state.startTask(id: a.id)
+        state.finishTaskDone()
+        XCTAssertFalse(state.isLongBreak)
+        XCTAssertEqual(state.remainingSeconds, 5 * 60)
+    }
+
+    func testSkipToBreakNeitherCountsNorBreaksTheRow() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        for _ in 0..<2 {
+            state.startTask(id: a.id)
+            state.finishTaskDone()
+            state.skipBreak()
+        }
+        state.startTask(id: a.id)
+        state.skipToBreak()
+        XCTAssertFalse(state.isLongBreak, "an unfinished task is not the third in the row")
+        state.skipBreak()
+        state.startTask(id: a.id)
+        state.finishTaskDone()
+        XCTAssertTrue(state.isLongBreak)
+    }
+
+    func testLongBreakSettingsSurviveOlderArchives() throws {
+        let old = #"{"workSeconds":1500,"breakSeconds":300}"#
+        let settings = try JSONDecoder().decode(Settings.self, from: Data(old.utf8))
+        XCTAssertEqual(settings.longBreakSeconds, 20 * 60)
+        XCTAssertEqual(settings.sessionsBeforeLongBreak, 3)
+    }
+
     func testSkipToBreakDoesNotCredit() {
         let state = makeState()
         let (a, _) = seedTwoTasks(in: state)
@@ -719,6 +790,277 @@ final class AppStateTests: XCTestCase {
         let siblings = try FileManager.default.contentsOfDirectory(atPath: dir.path)
         let backups = siblings.filter { $0.hasPrefix("data.json.corrupt-") }
         XCTAssertEqual(backups.count, 1, "the damaged archive must be moved aside, not overwritten")
+    }
+
+    // MARK: Restart
+
+    /// Rewrites one top-level key of the saved archive, as a crash could
+    /// leave it or a hand edit could.
+    private func editArchive(_ change: (inout [String: Any]) -> Void) throws {
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        change(&json)
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+    }
+
+    func testRestartPicksUpTheRunningSession() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(300)
+
+        let relaunched = makeState()
+        XCTAssertEqual(relaunched.phase, .work)
+        XCTAssertEqual(relaunched.activeTaskID, a.id)
+        XCTAssertEqual(relaunched.remainingSeconds, 20 * 60)
+        XCTAssertEqual(relaunched.growth, state.growth, "the same plant keeps growing")
+        XCTAssertNotNil(relaunched.activeLock, "the lock comes back with it")
+    }
+
+    func testRestartRelocksThroughTheListener() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+
+        let relaunched = makeState()
+        let listener = RecordingLockListener()
+        relaunched.lockListener = listener
+        relaunched.notifyLockChange()
+        XCTAssertEqual(listener.calls.last?.active, true)
+    }
+
+    func testRestartKeepsAPauseAndItsBudget() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(60)
+        state.pause()
+        now = now.addingTimeInterval(120)
+
+        let relaunched = makeState()
+        XCTAssertEqual(relaunched.phase, .paused)
+        XCTAssertEqual(relaunched.remainingSeconds, 24 * 60)
+        XCTAssertEqual(relaunched.pauseSecondsLeft, 3 * 60, "time paused before the restart still counts")
+    }
+
+    func testRestartKeepsTheLongBreakAndTheRow() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        for _ in 0..<2 {
+            state.startTask(id: a.id)
+            state.finishTaskDone()
+            state.skipBreak()
+        }
+        let row = makeState()
+        row.startTask(id: a.id)
+        row.finishTaskDone()
+        XCTAssertTrue(row.isLongBreak, "the row survived the restart")
+        now = now.addingTimeInterval(60)
+
+        let relaunched = makeState()
+        XCTAssertEqual(relaunched.phase, .breakTime)
+        XCTAssertTrue(relaunched.isLongBreak)
+        XCTAssertEqual(relaunched.remainingSeconds, 19 * 60)
+    }
+
+    /// No lock ran while the app was down, so a run whose time passed then
+    /// earns nothing.
+    func testWorkThatRanOutWhileClosedEndsQuietly() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        state.finishTaskDone()
+        state.skipBreak()
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(26 * 60)
+
+        let relaunched = makeState()
+        relaunched.tick()
+        XCTAssertEqual(relaunched.phase, .idle)
+        XCTAssertEqual(relaunched.todayCount, 1, "only the run finished before the restart")
+        XCTAssertNil(relaunched.phaseAlert)
+        XCTAssertEqual(relaunched.sessionsInARow, 0, "a dropped run starts the row over")
+    }
+
+    func testPauseThatRanOutWhileClosedEndsQuietly() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        state.pause()
+        now = now.addingTimeInterval(AppState.maxPauseSeconds + 1)
+
+        let relaunched = makeState()
+        XCTAssertEqual(relaunched.phase, .idle)
+        XCTAssertNil(relaunched.activeLock)
+    }
+
+    func testBreakThatRanOutWhileClosedLeavesItIdle() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        state.finishTaskDone()
+        now = now.addingTimeInterval(6 * 60)
+
+        let relaunched = makeState()
+        XCTAssertEqual(relaunched.phase, .idle)
+        XCTAssertEqual(relaunched.sessionsInARow, 1, "a break running out does not break the row")
+    }
+
+    func testRestartWithTheTaskGoneIsIdle() throws {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        try editArchive { json in
+            let tasks = json["tasks"] as? [[String: Any]] ?? []
+            json["tasks"] = tasks.filter { $0["id"] as? String != a.id.uuidString }
+        }
+
+        let relaunched = makeState()
+        XCTAssertEqual(relaunched.phase, .idle)
+        XCTAssertNil(relaunched.activeTaskID)
+    }
+
+    func testUnreadableSessionKeepsTheRestOfTheArchive() throws {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        try editArchive { $0["session"] = ["phase": "napping"] }
+
+        let relaunched = makeState()
+        XCTAssertEqual(relaunched.phase, .idle)
+        XCTAssertEqual(relaunched.tasks.map(\.title), ["Deep work", "Reply mail"])
+    }
+
+    func testIdleSavesNoSession() throws {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        state.stopNow()
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        XCTAssertNil(json["session"])
+    }
+
+    // MARK: Auto-start
+
+    private func makeAutoStartState(_ on: Bool) -> (AppState, TaskItem, TaskItem) {
+        let state = makeState()
+        var settings = state.settings
+        settings.autoStartNextTask = on
+        state.updateSettings(settings)
+        let (a, b) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        state.finishTaskDone()
+        return (state, a, b)
+    }
+
+    func testAutoStartRunsTheNextTaskWhenTheBreakEnds() {
+        let (state, _, b) = makeAutoStartState(true)
+        now = now.addingTimeInterval(5 * 60)
+        state.tick()
+        XCTAssertEqual(state.phase, .work)
+        XCTAssertEqual(state.activeTaskID, b.id)
+        XCTAssertNil(state.phaseAlert)
+    }
+
+    func testWithoutAutoStartTheBreakEndsIdle() {
+        let (state, _, b) = makeAutoStartState(false)
+        now = now.addingTimeInterval(5 * 60)
+        state.tick()
+        XCTAssertEqual(state.phase, .idle)
+        XCTAssertEqual(state.phaseAlert, .breakEnded(nextTaskID: b.id, nextTaskTitle: "Reply mail"))
+    }
+
+    func testAutoStartWaitsWhenTheBreakEndWasNoticedLate() {
+        let (state, _, _) = makeAutoStartState(true)
+        now = now.addingTimeInterval(5 * 60 + AppState.autoStartGraceSeconds + 1)
+        state.tick()
+        XCTAssertEqual(state.phase, .idle, "the Mac slept through the break's end")
+    }
+
+    func testAutoStartWithNothingLeftEndsIdle() {
+        let (state, _, b) = makeAutoStartState(true)
+        state.skipBreak()
+        state.startTask(id: b.id)
+        state.finishTaskDone()
+        now = now.addingTimeInterval(5 * 60)
+        state.tick()
+        XCTAssertEqual(state.phase, .idle)
+    }
+
+    // MARK: History
+
+    func testEveryKindOfEndIsRecorded() {
+        let state = makeState()
+        let (a, b) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(600)
+        state.finishTaskDone()
+        state.skipBreak()
+
+        state.startTask(id: b.id)
+        now = now.addingTimeInterval(120)
+        state.skipToBreak()
+        state.skipBreak()
+
+        state.startTask(id: b.id)
+        now = now.addingTimeInterval(90)
+        state.stopNow()
+
+        XCTAssertEqual(state.history.map(\.outcome), [.completed, .skippedToBreak, .stopped])
+        XCTAssertEqual(state.history.map(\.focusSeconds), [600, 120, 90])
+        XCTAssertEqual(state.history.map(\.title), ["Deep work", "Reply mail", "Reply mail"])
+    }
+
+    func testFalseStartsAreNotRecordedButQuickDonesAre() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(30)
+        state.stopNow()
+        XCTAssertTrue(state.history.isEmpty)
+
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(30)
+        state.finishTaskDone()
+        XCTAssertEqual(state.history.map(\.outcome), [.completed], "it counts as a session, so it is in the history")
+    }
+
+    func testPausesAreLeftOutOfFocusTime() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(60)
+        state.pause()
+        now = now.addingTimeInterval(200)
+        state.resume()
+        now = now.addingTimeInterval(60)
+        state.finishTaskDone()
+        XCTAssertEqual(state.history.first?.focusSeconds, 120)
+        XCTAssertEqual(state.history.first?.endedAt.timeIntervalSince(state.history.first!.startedAt), 320)
+    }
+
+    func testATimedOutRunEndsWhenItsTimeWasUp() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        let started = now
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(40 * 60) // the Mac slept past the end
+        state.tick()
+        XCTAssertEqual(state.history.first?.endedAt, started.addingTimeInterval(25 * 60))
+        XCTAssertEqual(state.history.first?.focusSeconds, 25 * 60)
+    }
+
+    func testHistorySurvivesARelaunchAndADayChange() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(600)
+        state.finishTaskDone()
+        now = now.addingTimeInterval(2 * 86_400)
+
+        let relaunched = makeState()
+        XCTAssertEqual(relaunched.todayCount, 0)
+        XCTAssertEqual(relaunched.history.count, 1)
+        XCTAssertEqual(relaunched.history.first?.title, "Deep work")
     }
 
     func testDoneTaskCanBeRepeated() {

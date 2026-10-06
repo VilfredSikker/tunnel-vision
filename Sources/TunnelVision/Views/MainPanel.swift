@@ -371,6 +371,13 @@ struct MainPanel: View {
             }
             .help("Manage presets")
 
+            Button {
+                HistoryWindowController.shared.show(model: model)
+            } label: {
+                Label("History", systemImage: "chart.bar")
+            }
+            .help("Past sessions")
+
             SettingsLink {
                 Label("Settings", systemImage: "gearshape")
             }

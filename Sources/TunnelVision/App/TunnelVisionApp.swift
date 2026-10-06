@@ -197,6 +197,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
 
+        // A session picked up from before a crash or restart locks again
+        // now that every layer and its notices are wired (the app layer has
+        // already thawed what the last run left frozen), and says so.
+        model.notifyLockChange()
+        if model.phase == .work, let task = model.activeTask {
+            confirmLock(for: task)
+        }
+
         // The control socket lets tunnelvision-mcp (and anything else local) read
         // and shape tasks, presets and the session.
         let api = ControlAPI(model: model)
