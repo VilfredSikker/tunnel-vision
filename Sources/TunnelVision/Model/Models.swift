@@ -452,8 +452,6 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
     var startedAt: Date?
     var workEndsAt: Date?
     var pausedRemaining: TimeInterval?
-    var pausedAt: Date?
-    var pauseUsed: TimeInterval
     var workTotal: TimeInterval
     var growth: GrowthPlan?
     var growthBaseProgress: Double

@@ -180,12 +180,7 @@ final class StatusItemController: NSObject {
             item.isEnabled = false
             menu.addItem(item)
         case .work:
-            if model.canPause {
-                menu.addItem(makeItem("Pause", #selector(quickPauseResume)))
-            } else {
-                // No action: the menu shows it disabled, with why.
-                menu.addItem(NSMenuItem(title: "Pause — no pause time left this session", action: nil, keyEquivalent: ""))
-            }
+            menu.addItem(makeItem("Pause", #selector(quickPauseResume)))
         case .paused:
             menu.addItem(makeItem("Resume", #selector(quickPauseResume)))
         case .breakTime:

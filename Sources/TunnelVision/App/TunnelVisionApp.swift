@@ -157,14 +157,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.onSessionStarted = { [weak self] task in
             self?.confirmLock(for: task)
         }
-        model.onPauseLimitReached = { [weak self] in
-            guard let self, let task = self.model.activeTask else { return }
-            self.toast?.show(
-                title: "Pause over: back to “\(task.title)”",
-                detail: "This session’s \(TimeFormat.minutes(AppState.maxPauseSeconds)) of pause time is used up; the lock is on again.",
-                symbol: "lock.fill"
-            )
-        }
 
         let notice = BlockedNoticeController(
             anchorWindow: { [weak status] in status?.statusButtonWindow },

@@ -17,11 +17,9 @@ struct SessionHeader: View {
                 editTaskRow(task)
             }
             if model.phase == .paused {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    Text(pauseCaption)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text("Paused until you resume; the lock is off")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             if model.phase == .work, !model.lockWarningMessages.isEmpty {
                 lockWarnings
@@ -34,12 +32,6 @@ struct SessionHeader: View {
 
     private var fraction: Double {
         Theme.ringFraction(model.workElapsedFraction)
-    }
-
-    private var pauseCaption: String {
-        guard let endsAt = model.pauseEndsAt else { return "Paused" }
-        let left = max(0, Int(ceil(endsAt.timeIntervalSinceNow)))
-        return "Paused — the lock returns in \(TimeFormat.clock(left))"
     }
 
     /// Layers that cannot enforce what this session asks: the lock is
@@ -138,12 +130,9 @@ struct SessionHeader: View {
             }
             .controlSize(.large)
             .tint(Theme.allowed)
-            // Pausing is budgeted per session; once it is spent, the button
-            // stays but cannot pause.
-            .disabled(model.phase == .work && !model.canPause)
-            .help(model.phase == .work && !model.canPause
-                  ? "No pause time left in this session"
-                  : "Pauses lift the lock; \(TimeFormat.minutes(AppState.maxPauseSeconds)) in total per session")
+            .help(model.phase == .work
+                  ? "Pause the timer and lift the lock until you resume"
+                  : "Resume the timer and the lock")
 
             // Enabled for repeats too: Done ends this run with credit, and
             // the task simply stays checked off.

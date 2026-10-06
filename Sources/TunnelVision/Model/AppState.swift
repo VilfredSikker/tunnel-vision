@@ -48,9 +48,6 @@ final class AppState {
     /// A session started; the app confirms what is now locked.
     var onSessionStarted: ((TaskItem) -> Void)?
 
-    /// A pause used up the session's pause budget and it resumed by itself.
-    var onPauseLimitReached: (() -> Void)?
-
     /// What the running task locks to, or nil for an open session (no
     /// preset and no rules of its own): the same decision the lock makes.
     var activeLock: (rules: [Rule], mode: Mode)? {
@@ -121,10 +118,6 @@ final class AppState {
     private var workEndsAt: Date?
     /// Remaining work seconds captured at pause time.
     private var pausedRemaining: TimeInterval?
-    /// When the current pause began.
-    private var pausedAt: Date?
-    /// Pause time this session has used, the running pause not counted.
-    private var pauseUsed: TimeInterval = 0
     /// Total work seconds of the current run, for ring progress. Grows when
     /// the session is extended.
     private var workTotal: TimeInterval = 0
@@ -579,7 +572,6 @@ final class AppState {
         growth = GrowthPlan(startedAt: clock(), durationSeconds: workTotal)
         growthBaseProgress = 0
         growthBaseElapsed = 0
-        pauseUsed = 0
         phase = .work
         phaseAlert = nil
         rememberPreset(task.presetID)
@@ -608,35 +600,11 @@ final class AppState {
         return url
     }
 
-    /// A pause lifts the lock, so pausing is budgeted: this much in total
-    /// per session. A pause that uses up the budget ends by itself, and
-    /// pausing again straight away does not reset it.
-    static let maxPauseSeconds: TimeInterval = 5 * 60
-
-    /// Pause time left in this session, the running pause counted.
-    var pauseSecondsLeft: TimeInterval {
-        var used = pauseUsed
-        if phase == .paused, let pausedAt {
-            used += clock().timeIntervalSince(pausedAt)
-        }
-        return max(0, Self.maxPauseSeconds - used)
-    }
-
-    /// The running session can still be paused.
-    var canPause: Bool {
-        phase == .work && pauseSecondsLeft > 0
-    }
-
-    /// When the running pause ends by itself (phase == .paused).
-    var pauseEndsAt: Date? {
-        guard phase == .paused, let pausedAt else { return nil }
-        return pausedAt.addingTimeInterval(Self.maxPauseSeconds - pauseUsed)
-    }
-
+    /// A pause freezes the timer until the user resumes it: no limit, and it
+    /// never ends by itself. A break is the timed one.
     func pause() {
-        guard canPause, let endsAt = workEndsAt else { return }
+        guard phase == .work, let endsAt = workEndsAt else { return }
         pausedRemaining = max(0, endsAt.timeIntervalSince(clock()))
-        pausedAt = clock()
         phase = .paused
         persist()
         Self.log.info("session paused: remaining=\(Int(self.pausedRemaining ?? 0))s")
@@ -647,10 +615,6 @@ final class AppState {
     func resume() {
         guard phase == .paused, let remaining = pausedRemaining else { return }
         workEndsAt = clock().addingTimeInterval(remaining)
-        if let pausedAt {
-            pauseUsed = min(Self.maxPauseSeconds, pauseUsed + clock().timeIntervalSince(pausedAt))
-        }
-        pausedAt = nil
         phase = .work
         persist()
         Self.log.info("session resumed: remaining=\(Int(remaining))s")
@@ -803,13 +767,7 @@ final class AppState {
                     notifyLockChange()
                 }
             }
-        case .paused:
-            if let pauseEndsAt, clock() >= pauseEndsAt {
-                Self.log.info("pause limit reached")
-                resume()
-                onPauseLimitReached?()
-            }
-        case .idle:
+        case .paused, .idle:
             break
         }
         tickCount += 1
@@ -858,8 +816,6 @@ final class AppState {
         activeTaskID = nil
         workEndsAt = nil
         pausedRemaining = nil
-        pausedAt = nil
-        pauseUsed = 0
         workTotal = 0
         sessionStartedAt = nil
         growth = nil
@@ -1031,8 +987,6 @@ final class AppState {
             startedAt: sessionStartedAt,
             workEndsAt: workEndsAt,
             pausedRemaining: pausedRemaining,
-            pausedAt: pausedAt,
-            pauseUsed: pauseUsed,
             workTotal: workTotal,
             growth: growth,
             growthBaseProgress: growthBaseProgress,
@@ -1064,9 +1018,9 @@ final class AppState {
                 return lapsed("work ran out")
             }
         case .paused:
-            guard taskExists, saved.pausedRemaining != nil, let pausedAt = saved.pausedAt,
-                  now < pausedAt.addingTimeInterval(Self.maxPauseSeconds - saved.pauseUsed) else {
-                return lapsed("pause ran out")
+            // A pause has no end: it holds however long the app was closed.
+            guard taskExists, saved.pausedRemaining != nil else {
+                return lapsed("paused task is gone")
             }
         case .breakTime:
             guard let endsAt = saved.breakEndsAt, now < endsAt else {
@@ -1082,8 +1036,6 @@ final class AppState {
         sessionStartedAt = saved.startedAt
         workEndsAt = saved.workEndsAt
         pausedRemaining = saved.pausedRemaining
-        pausedAt = saved.pausedAt
-        pauseUsed = saved.pauseUsed
         workTotal = saved.workTotal
         growth = saved.growth
         growthBaseProgress = saved.growthBaseProgress

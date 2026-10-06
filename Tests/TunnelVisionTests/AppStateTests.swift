@@ -516,63 +516,43 @@ final class AppStateTests: XCTestCase {
         XCTAssertNil(state.phaseAlert)
     }
 
-    // MARK: Pause limit
+    // MARK: Pause
 
-    /// A pause lifts the lock, so it ends by itself after five minutes.
-    func testPauseResumesItselfAfterTheLimit() {
+    /// A pause holds until the user resumes it; it never ends by itself.
+    func testPauseHoldsUntilResumed() {
         let state = makeState()
         let listener = RecordingLockListener()
         state.lockListener = listener
-        var limitsReached = 0
-        state.onPauseLimitReached = { limitsReached += 1 }
         let (a, _) = seedTwoTasks(in: state)
         state.startTask(id: a.id)
         now = now.addingTimeInterval(60)
         state.pause()
-        XCTAssertEqual(state.pauseEndsAt, now.addingTimeInterval(AppState.maxPauseSeconds))
 
-        now = now.addingTimeInterval(AppState.maxPauseSeconds - 1)
+        now = now.addingTimeInterval(3 * 60 * 60)
         state.tick()
-        XCTAssertEqual(state.phase, .paused)
+        XCTAssertEqual(state.phase, .paused, "hours later, still paused")
+        XCTAssertEqual(state.remainingSeconds, 24 * 60)
 
-        now = now.addingTimeInterval(2)
-        state.tick()
+        state.resume()
         XCTAssertEqual(state.phase, .work)
         XCTAssertEqual(listener.calls.last?.active, true, "the lock comes back with the session")
         XCTAssertEqual(state.remainingSeconds, 24 * 60, "time spent paused is not taken from the session")
-        XCTAssertNil(state.pauseEndsAt)
-        XCTAssertEqual(limitsReached, 1, "the app is told, so it can say the lock is back")
-
-        state.pause()
-        state.resume()
-        XCTAssertEqual(limitsReached, 1, "a resume by hand is not announced")
     }
 
-    /// Before: each pause got a fresh five minutes, so pausing again right
-    /// after the auto-resume kept the lock off for good.
-    func testPauseTimeIsBudgetedPerSession() {
+    /// Pausing has no allowance: a running session can always be paused.
+    func testPauseIsAlwaysAllowed() {
         let state = makeState()
-        let (a, b) = seedTwoTasks(in: state)
+        let (a, _) = seedTwoTasks(in: state)
         state.startTask(id: a.id)
 
-        state.pause()
-        now = now.addingTimeInterval(3 * 60)
-        state.resume()
-        XCTAssertEqual(state.pauseSecondsLeft, 2 * 60)
-
-        state.pause()
-        XCTAssertEqual(state.pauseEndsAt, now.addingTimeInterval(2 * 60), "the second pause gets what is left")
-        now = now.addingTimeInterval(2 * 60 + 1)
-        state.tick()
-        XCTAssertEqual(state.phase, .work)
-
-        XCTAssertFalse(state.canPause)
-        state.pause()
-        XCTAssertEqual(state.phase, .work, "no pause time left this session")
-
-        state.stopNow()
-        state.startTask(id: b.id)
-        XCTAssertTrue(state.canPause, "the next session starts with a full budget")
+        for _ in 0..<5 {
+            state.pause()
+            XCTAssertEqual(state.phase, .paused)
+            now = now.addingTimeInterval(10 * 60)
+            state.tick()
+            state.resume()
+            XCTAssertEqual(state.phase, .work)
+        }
     }
 
     // MARK: Preset URLs
@@ -828,7 +808,7 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(listener.calls.last?.active, true)
     }
 
-    func testRestartKeepsAPauseAndItsBudget() {
+    func testRestartKeepsAPause() {
         let state = makeState()
         let (a, _) = seedTwoTasks(in: state)
         state.startTask(id: a.id)
@@ -839,7 +819,6 @@ final class AppStateTests: XCTestCase {
         let relaunched = makeState()
         XCTAssertEqual(relaunched.phase, .paused)
         XCTAssertEqual(relaunched.remainingSeconds, 24 * 60)
-        XCTAssertEqual(relaunched.pauseSecondsLeft, 3 * 60, "time paused before the restart still counts")
     }
 
     func testRestartKeepsTheLongBreakAndTheRow() {
@@ -881,16 +860,18 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(relaunched.sessionsInARow, 0, "a dropped run starts the row over")
     }
 
-    func testPauseThatRanOutWhileClosedEndsQuietly() {
+    /// A pause has no end, so one left over a long time closed still holds.
+    func testLongPauseWhileClosedIsKept() {
         let state = makeState()
         let (a, _) = seedTwoTasks(in: state)
         state.startTask(id: a.id)
         state.pause()
-        now = now.addingTimeInterval(AppState.maxPauseSeconds + 1)
+        now = now.addingTimeInterval(8 * 60 * 60)
 
         let relaunched = makeState()
-        XCTAssertEqual(relaunched.phase, .idle)
-        XCTAssertNil(relaunched.activeLock)
+        XCTAssertEqual(relaunched.phase, .paused)
+        XCTAssertEqual(relaunched.activeTaskID, a.id)
+        XCTAssertEqual(relaunched.remainingSeconds, 25 * 60)
     }
 
     func testBreakThatRanOutWhileClosedLeavesItIdle() {
