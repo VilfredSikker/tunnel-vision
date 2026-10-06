@@ -80,21 +80,41 @@ private struct RuleRowView: View {
         .frame(width: 92)
     }
 
+    /// A known app reads as icon and name, with its bundle id small beneath
+    /// and still editable; an unknown or empty one is a bordered field.
+    /// The field keeps one place in the view tree either way, so typing an
+    /// id into or out of a known app keeps focus.
     private var appField: some View {
-        HStack(spacing: 2) {
-            TextField("bundle id", text: $rule.bundleID)
-                .textFieldStyle(.roundedBorder)
-                .font(.caption)
-                .overlay(alignment: .trailing) {
-                    if !rule.bundleID.isEmpty, let name = AppCatalog.displayName(forBundleID: rule.bundleID) {
-                        Text(name)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .padding(.trailing, 6)
-                            .allowsHitTesting(false)
-                    }
+        let name = rule.bundleID.isEmpty ? nil : AppCatalog.displayName(forBundleID: rule.bundleID)
+        let known = name != nil
+        return HStack(spacing: 2) {
+            HStack(spacing: 6) {
+                if known, let icon = AppCatalog.icon(forBundleID: rule.bundleID) {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(width: 20, height: 20)
                 }
+                VStack(alignment: .leading, spacing: 0) {
+                    if let name {
+                        Text(name)
+                            .font(.callout)
+                            .lineLimit(1)
+                    }
+                    TextField("bundle id", text: $rule.bundleID)
+                        .textFieldStyle(.plain)
+                        .font(known ? .caption2 : .caption)
+                        .foregroundStyle(known ? .secondary : .primary)
+                        .padding(.horizontal, known ? 0 : 6)
+                        .padding(.vertical, known ? 0 : 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .strokeBorder(Color.secondary.opacity(0.5))
+                                .background(RoundedRectangle(cornerRadius: 5).fill(Color(nsColor: .textBackgroundColor)))
+                                .opacity(known ? 0 : 1)
+                        )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Menu {
                 Section("Running apps") {
                     ForEach(AppCatalog.runningApps) { app in

@@ -178,12 +178,13 @@ struct TaskEditorView: View {
                     Label("Pick windows & apps…", systemImage: "macwindow.on.rectangle")
                         .font(.callout)
                 }
-                if !visualPickNotice.isEmpty {
-                    Text(visualPickNotice)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
                 Spacer()
+            }
+            if !visualPickNotice.isEmpty {
+                Text(visualPickNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let preset = selectedPreset {
                 HStack {
