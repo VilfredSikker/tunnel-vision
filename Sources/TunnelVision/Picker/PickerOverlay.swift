@@ -128,6 +128,66 @@ final class PickerOverlayModel {
         }
     }
 
+    // MARK: Select all / deselect all
+
+    private var trimmedQuery: String {
+        search.trimmingCharacters(in: .whitespaces).lowercased()
+    }
+
+    /// Workspaces the buttons act on: those listed, and while searching only
+    /// the ones whose label matches.
+    private var listedHerdrWorkspaces: [HerdrWorkspace] {
+        let shown = standaloneHerdr?.workspaces ?? filteredApps.flatMap(herdrWorkspaces(hostedBy:))
+        let query = trimmedQuery
+        guard !query.isEmpty else { return shown }
+        return shown.filter { $0.label.lowercased().contains(query) }
+    }
+
+    /// Picks everything listed. An app the search names is picked whole; one
+    /// listed for a matching window or workspace gets just those windows.
+    func selectAll() {
+        let query = trimmedQuery
+        for app in filteredApps {
+            let narrowed = !query.isEmpty
+                && !app.name.lowercased().contains(query)
+                && !app.bundleID.lowercased().contains(query)
+            if narrowed, !isWhole(app) {
+                for window in app.windows where window.displayName?.lowercased().contains(query) == true {
+                    windowIDs.insert(window.id)
+                }
+            } else if !isWhole(app) {
+                toggleApp(app)
+            }
+        }
+        for workspace in listedHerdrWorkspaces {
+            herdrLabels.insert(workspace.label.lowercased())
+        }
+    }
+
+    /// Drops everything listed; with no search, that is the whole selection,
+    /// including allowed apps that are not running.
+    func deselectAll() {
+        guard !trimmedQuery.isEmpty else {
+            keptListedBundles.formUnion(wholeAppBundles)
+            wholeAppBundles.removeAll()
+            windowIDs.removeAll()
+            siteWideWindowIDs.removeAll()
+            herdrLabels.removeAll()
+            return
+        }
+        for app in filteredApps {
+            keptListedBundles.insert(app.bundleID)
+            wholeAppBundles.remove(app.bundleID)
+            for window in app.windows {
+                windowIDs.remove(window.id)
+                siteWideWindowIDs.remove(window.id)
+            }
+        }
+        for workspace in listedHerdrWorkspaces {
+            herdrLabels.remove(workspace.label.lowercased())
+        }
+    }
+
     // MARK: Browser windows: page or site
 
     /// A browser window is picked by URL; the rule covers the page (host and
@@ -646,6 +706,7 @@ struct PickerOverlayView: View {
             }
             HStack(spacing: 12) {
                 summaryText
+                selectionButtons
                 Spacer()
                 if model.showPresetField || !model.allowsPresetSave {
                     modePicker
@@ -684,6 +745,19 @@ struct PickerOverlayView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(1)
+    }
+
+    private var selectionButtons: some View {
+        let searching = !model.search.trimmingCharacters(in: .whitespaces).isEmpty
+        return HStack(spacing: 10) {
+            Button("Select all") { model.selectAll() }
+                .help(searching ? "Allow everything that matches the search" : "Allow every listed app and workspace")
+            Button("Deselect all") { model.deselectAll() }
+                .disabled(model.nothingPicked)
+                .help(searching ? "Drop everything that matches the search" : "Drop the whole selection")
+        }
+        .buttonStyle(.link)
+        .font(.caption)
     }
 
     @ViewBuilder

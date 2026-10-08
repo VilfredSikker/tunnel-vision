@@ -138,6 +138,68 @@ final class PickerSelectionTests: XCTestCase {
     }
 
     @MainActor
+    func testSelectAllPicksListedAppsAndHerdrWorkspaces() {
+        let model = modelWithWindowlessApps()
+        model.windowIDs = [11]
+        model.herdr = PickerHerdrInfo(hostBundleID: nil, workspaces: [
+            HerdrWorkspace(id: "w1", label: "Tunnel-Vision", repoName: nil, checkoutPath: nil, focused: false),
+        ])
+        model.selectAll()
+        XCTAssertEqual(model.wholeAppBundles, [slack, xcode], "hidden windowless apps stay out")
+        XCTAssertTrue(model.windowIDs.isEmpty, "a whole-app pick replaces its window picks")
+        XCTAssertEqual(model.herdrLabels, ["tunnel-vision"])
+    }
+
+    @MainActor
+    func testSelectAllWhileSearchingPicksOnlyMatchingWindows() {
+        let model = makeModel()
+        model.search = "engin"
+        model.selectAll()
+        XCTAssertTrue(model.wholeAppBundles.isEmpty, "an app matched only by a window is not picked whole")
+        XCTAssertEqual(model.windowIDs, [11])
+    }
+
+    @MainActor
+    func testDeselectAllClearsEverythingIncludingAppsNotRunning() {
+        let notRunning = "com.example.closed"
+        let model = makeModel(whole: [xcode, notRunning], windows: [11])
+        model.herdrLabels = ["tunnel-vision"]
+        model.deselectAll()
+        XCTAssertTrue(model.nothingPicked)
+        XCTAssertEqual(model.summary.appCount, 0)
+        XCTAssertTrue(model.rules().isEmpty)
+        XCTAssertTrue(model.filteredApps.contains { $0.bundleID == xcode }, "dropped apps stay listed")
+    }
+
+    @MainActor
+    func testSearchScopesHerdrWorkspacesForBothButtons() {
+        let model = makeModel()
+        model.herdr = PickerHerdrInfo(hostBundleID: nil, workspaces: [
+            HerdrWorkspace(id: "w1", label: "tunnel-vision", repoName: nil, checkoutPath: nil, focused: false),
+            HerdrWorkspace(id: "w2", label: "easy-review", repoName: nil, checkoutPath: nil, focused: false),
+        ])
+        model.herdrLabels = ["easy-review"]
+        model.search = "xcode"
+        model.selectAll()
+        XCTAssertEqual(model.herdrLabels, ["easy-review"], "a search naming an app leaves workspaces alone")
+        model.deselectAll()
+        XCTAssertEqual(model.herdrLabels, ["easy-review"])
+        XCTAssertTrue(model.wholeAppBundles.isEmpty)
+
+        model.search = "tunnel"
+        model.selectAll()
+        XCTAssertEqual(model.herdrLabels, ["easy-review", "tunnel-vision"])
+    }
+
+    @MainActor
+    func testDeselectAllWhileSearchingKeepsTheRest() {
+        let model = makeModel(whole: [xcode, slack])
+        model.search = "xcode"
+        model.deselectAll()
+        XCTAssertEqual(model.wholeAppBundles, [slack])
+    }
+
+    @MainActor
     func testNarrowingToTitlelessWindowIsRefused() {
         let model = makeModel(whole: [slack])
         let slackApp = model.apps.first { $0.bundleID == slack }!
