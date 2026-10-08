@@ -151,6 +151,13 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
     var priority: Int
     /// When the task was created; used for the "Created" sort.
     var createdDate: Date
+    /// Shared by a task and every copy made of it (re-run or duplicate); each
+    /// copy is one more session of the same work. A fresh task starts its own.
+    var seriesID: UUID
+    /// The outcome that makes the task finished, in the user's words.
+    var doneWhen: String
+    /// The goal this task is a step toward, if any.
+    var goalID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -162,7 +169,10 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
         doneAt: [String: Date] = [:],
         repeatDaily: Bool = false,
         priority: Int = 2,
-        createdDate: Date = Date()
+        createdDate: Date = Date(),
+        seriesID: UUID? = nil,
+        doneWhen: String = "",
+        goalID: UUID? = nil
     ) {
         self.id = id
         self.title = title
@@ -174,6 +184,9 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
         self.repeatDaily = repeatDaily
         self.priority = priority
         self.createdDate = createdDate
+        self.seriesID = seriesID ?? id
+        self.doneWhen = doneWhen
+        self.goalID = goalID
     }
 
     func isDone(on day: String) -> Bool {
@@ -210,9 +223,9 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
         }
     }
 
-    /// Copies the task's schedule (including repeatDaily) onto a fresh copy.
-    /// Used by the re-run flow so a repeated one-off stays a one-off and a
-    /// repeating task's copy keeps repeating.
+    /// Copies the task's schedule (including repeatDaily) onto a fresh copy in
+    /// the same series. Used by re-run and duplicate, so a repeated one-off
+    /// stays a one-off and a repeating task's copy keeps repeating.
     func repeatedCopy(id: UUID = UUID()) -> TaskItem {
         TaskItem(
             id: id,
@@ -222,18 +235,21 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
             overrides: overrides,
             repeatDaily: repeatDaily,
             priority: priority,
-            createdDate: createdDate
+            createdDate: createdDate,
+            seriesID: seriesID,
+            doneWhen: doneWhen,
+            goalID: goalID
         )
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, durationSeconds, presetID, overrides, doneDays, doneAt, repeatDaily, priority, createdDate
+        case id, title, durationSeconds, presetID, overrides, doneDays, doneAt, repeatDaily, priority, createdDate, seriesID, doneWhen, goalID
     }
 }
 
 extension TaskItem {
-    /// `doneAt`, `repeatDaily`, `priority`, and `createdDate` arrived after
-    /// v1; older archives keep decoding without them.
+    /// `doneAt`, `repeatDaily`, `priority`, `createdDate`, `seriesID`,
+    /// `doneWhen` and `goalID` arrived after v1; older archives keep decoding without them.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
@@ -246,7 +262,26 @@ extension TaskItem {
         repeatDaily = try container.decodeIfPresent(Bool.self, forKey: .repeatDaily) ?? false
         priority = try container.decodeIfPresent(Int.self, forKey: .priority) ?? 2
         createdDate = try container.decodeIfPresent(Date.self, forKey: .createdDate) ?? Date.distantPast
+        seriesID = try container.decodeIfPresent(UUID.self, forKey: .seriesID) ?? id
+        doneWhen = try container.decodeIfPresent(String.self, forKey: .doneWhen) ?? ""
+        goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
     }
+}
+
+// MARK: - Goal
+
+/// An outcome bigger than one task. Its tasks are the session-sized steps
+/// toward it; the goal itself is finished by hand.
+struct Goal: Codable, Identifiable, Equatable, Sendable {
+    var id: UUID = UUID()
+    var title: String
+    /// What finishing the goal looks like.
+    var doneWhen: String = ""
+    /// 1 = high, 2 = medium, 3 = low, as for tasks.
+    var priority: Int = 2
+    var createdDate: Date = Date()
+    /// Set when the goal is finished; finished goals leave the panel.
+    var doneAt: Date?
 }
 
 // MARK: - Preset
@@ -436,11 +471,12 @@ struct Archive: Codable, Sendable {
     /// Sessions finished in a row on `countDay` since the last long break.
     /// Kept outside `session`: the row lasts through idle time between tasks.
     var sessionsInARow: Int = 0
+    var goals: [Goal] = []
 
     static let currentVersion = 1
 
     enum CodingKeys: String, CodingKey {
-        case version, tasks, presets, settings, todayCount, countDay, lastUsedPresetID, removedBuiltinNames, garden, session, sessionsInARow
+        case version, tasks, presets, settings, todayCount, countDay, lastUsedPresetID, removedBuiltinNames, garden, session, sessionsInARow, goals
     }
 }
 
@@ -477,6 +513,7 @@ extension Archive {
         // A session that no longer reads is dropped, never the whole archive.
         session = (try? container.decodeIfPresent(SessionSnapshot.self, forKey: .session)) ?? nil
         sessionsInARow = try container.decodeIfPresent(Int.self, forKey: .sessionsInARow) ?? 0
+        goals = try container.decodeIfPresent([Goal].self, forKey: .goals) ?? []
     }
 }
 

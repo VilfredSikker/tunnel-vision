@@ -27,7 +27,10 @@ final class ControlAPI {
             let presetID = try presetIDParam(params["preset"])
             let rules = try rulesParam(params["rules"]) ?? []
             let repeatDaily = params["repeat_daily"] as? Bool ?? false
-            let task = model.addTask(title: title, durationSeconds: TimeInterval(minutes * 60), presetID: presetID, overrides: rules, repeatDaily: repeatDaily)
+            let priority = try priorityParam(params["priority"]) ?? 2
+            let doneWhen = params["done_when"] as? String ?? ""
+            let goalID = try goalParam(params["goal"])?.id
+            let task = model.addTask(title: title, durationSeconds: TimeInterval(minutes * 60), presetID: presetID, overrides: rules, repeatDaily: repeatDaily, priority: priority, doneWhen: doneWhen, goalID: goalID)
             return ["task": taskJSON(task, day: model.todayKey)]
 
         case "tasks.update":
@@ -48,8 +51,22 @@ final class ControlAPI {
             if let repeatDaily = params["repeat_daily"] as? Bool {
                 task.repeatDaily = repeatDaily
             }
+            if let priority = try priorityParam(params["priority"]) {
+                task.priority = priority
+            }
+            if let doneWhen = params["done_when"] as? String {
+                task.doneWhen = doneWhen
+            }
+            if params.keys.contains("goal") {
+                task.goalID = try goalParam(params["goal"])?.id
+            }
             model.updateTask(task)
             return ["task": taskJSON(model.tasks.first { $0.id == task.id } ?? task, day: model.todayKey)]
+
+        case "tasks.duplicate":
+            let task = try taskParam(params)
+            guard let copy = model.duplicateTask(id: task.id) else { throw ControlError.invalidParams("unknown task") }
+            return ["task": taskJSON(copy, day: model.todayKey)]
 
         case "tasks.delete":
             let task = try taskParam(params)
@@ -72,6 +89,47 @@ final class ControlAPI {
             let day = try dayParam(params)
             model.setTaskDone(id: task.id, done: done, on: day)
             return ["task": taskJSON(model.tasks.first { $0.id == task.id } ?? task, day: day ?? model.todayKey)]
+
+        case "history.list":
+            let to = try dayParam(params, key: "to") ?? model.todayKey
+            let from = try dayParam(params, key: "from") ?? DayKey.key(byAdding: -6, to: to) ?? to
+            guard from <= to else { throw ControlError.invalidParams("from must not be after to") }
+            guard let limit = DayKey.key(byAdding: 365, to: from), to <= limit else {
+                throw ControlError.invalidParams("the range can span at most a year")
+            }
+            return historyJSON(from: from, to: to)
+
+        case "goals.list":
+            return ["goals": model.goals.map(goalJSON)]
+
+        case "goals.add":
+            let title = try requiredString("title", in: params)
+            let priority = try priorityParam(params["priority"]) ?? 2
+            let goal = model.addGoal(title: title, doneWhen: params["done_when"] as? String ?? "", priority: priority)
+            return ["goal": goalJSON(goal)]
+
+        case "goals.update":
+            var goal = try goalParam(params["goal"], required: true)!
+            if let title = params["title"] as? String {
+                guard !title.trimmingCharacters(in: .whitespaces).isEmpty else { throw ControlError.invalidParams("title is empty") }
+                goal.title = title
+            }
+            if let doneWhen = params["done_when"] as? String {
+                goal.doneWhen = doneWhen
+            }
+            if let priority = try priorityParam(params["priority"]) {
+                goal.priority = priority
+            }
+            model.updateGoal(goal)
+            if let done = params["done"] as? Bool {
+                model.setGoalDone(id: goal.id, done: done)
+            }
+            return ["goal": goalJSON(model.goal(id: goal.id) ?? goal)]
+
+        case "goals.delete":
+            let goal = try goalParam(params["goal"], required: true)!
+            model.deleteGoal(id: goal.id)
+            return ["deleted": goal.id.uuidString]
 
         case "presets.list":
             return ["presets": model.presets.map(presetJSON)]
@@ -199,9 +257,25 @@ final class ControlAPI {
         return minutes
     }
 
-    private func dayParam(_ params: [String: Any]) throws -> String? {
-        guard let day = params["day"] as? String, !day.isEmpty else { return nil }
-        guard DayKey.date(from: day) != nil else { throw ControlError.invalidParams("day must be yyyy-MM-dd") }
+    /// The panel's red, yellow and green dots.
+    private static let priorityNames = [1: "high", 2: "medium", 3: "low"]
+
+    /// high, medium or low; 1 to 3 is accepted too.
+    private func priorityParam(_ raw: Any?) throws -> Int? {
+        guard let raw else { return nil }
+        if let text = raw as? String,
+           let match = Self.priorityNames.first(where: { $0.value == text.lowercased().trimmingCharacters(in: .whitespaces) }) {
+            return match.key
+        }
+        if let value = raw as? Int, Self.priorityNames[value] != nil {
+            return value
+        }
+        throw ControlError.invalidParams("priority must be high, medium or low")
+    }
+
+    private func dayParam(_ params: [String: Any], key: String = "day") throws -> String? {
+        guard let day = params[key] as? String, !day.isEmpty else { return nil }
+        guard DayKey.date(from: day) != nil else { throw ControlError.invalidParams("\(key) must be yyyy-MM-dd") }
         return day
     }
 
@@ -227,6 +301,28 @@ final class ControlAPI {
         guard !trimmed.isEmpty else { return nil }
         guard let preset = findPreset(trimmed) else { throw ControlError.notFound("no preset named or with id “\(trimmed)”") }
         return preset.id
+    }
+
+    /// A goal by id or title (case-insensitive). An empty string is no goal,
+    /// which `required` refuses.
+    private func goalParam(_ raw: Any?, required: Bool = false) throws -> Goal? {
+        guard let raw else {
+            if required { throw ControlError.invalidParams("goal is required") }
+            return nil
+        }
+        guard let text = raw as? String else { throw ControlError.invalidParams("goal must be a title or id") }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            if required { throw ControlError.invalidParams("goal is required") }
+            return nil
+        }
+        if let id = UUID(uuidString: trimmed), let goal = model.goal(id: id) {
+            return goal
+        }
+        guard let goal = model.goals.first(where: { $0.title.caseInsensitiveCompare(trimmed) == .orderedSame }) else {
+            throw ControlError.notFound("no goal titled or with id “\(trimmed)”")
+        }
+        return goal
     }
 
     private func findPreset(_ text: String) -> Preset? {
@@ -272,6 +368,8 @@ final class ControlAPI {
             "phase": phaseName(model.phase),
             "today": model.todayKey,
             "sessions_today": model.todayCount,
+            // The order the panel shows the open tasks in.
+            "task_sort": model.settings.taskSort.rawValue,
         ]
         if let remaining = model.remainingSeconds {
             state["remaining_seconds"] = remaining
@@ -282,19 +380,10 @@ final class ControlAPI {
         if let active = model.activeTask {
             state["active_task"] = taskJSON(active, day: model.todayKey)
         }
-        // What starts next: the first task still not done today other than
-        // the one already running. Retired one-offs do not count; when
-        // everything is checked off, the first repeating task is the next up.
-        if let activeID = model.activeTaskID {
-            if let next = model.tasks.first(where: { task in
-                guard task.id != activeID else { return false }
-                return task.isDone(on: model.todayKey) ? task.repeatDaily : !task.isRetired(by: model.todayKey)
-            }) {
-                state["next_up"] = taskJSON(next, day: model.todayKey)
-            }
-        } else if let next = model.tasks.first(where: { task in
-            task.isDone(on: model.todayKey) ? task.repeatDaily : !task.isRetired(by: model.todayKey)
-        }) {
+        // What starts next, in the order the panel shows, other than the task
+        // already running.
+        if let nextID = model.nextUpID(on: model.todayKey, excluding: model.activeTaskID),
+           let next = model.tasks.first(where: { $0.id == nextID }) {
             state["next_up"] = taskJSON(next, day: model.todayKey)
         }
         return state
@@ -324,18 +413,96 @@ final class ControlAPI {
             // On the day's open list, as the panel shows it.
             "open": model.isOpen(task, on: day),
             "repeat_daily": task.repeatDaily,
+            "priority": Self.priorityNames[task.priority] ?? "medium",
+            "sessions": model.sessionProgress(for: task, on: day).total,
+            "sessions_done": model.sessionProgress(for: task, on: day).done,
+            "done_when": task.doneWhen,
             "active": task.id == model.activeTaskID,
         ]
+        if task.createdDate != .distantPast {
+            json["created_at"] = ISO8601DateFormatter().string(from: task.createdDate)
+        }
         if let presetID = task.presetID, let preset = model.presets.first(where: { $0.id == presetID }) {
             json["preset"] = ["id": preset.id.uuidString, "name": preset.name]
         } else {
             json["preset"] = NSNull()
+        }
+        if let goal = model.goal(id: task.goalID) {
+            json["goal"] = ["id": goal.id.uuidString, "title": goal.title]
+        } else {
+            json["goal"] = NSNull()
         }
         if let time = task.doneTime(on: day) {
             json["done_at"] = ISO8601DateFormatter().string(from: time)
         }
         if let position {
             json["position"] = position
+        }
+        return json
+    }
+
+    /// Every ended run between the two days, inclusive, oldest first, with a
+    /// total per day. Sessions count only completed runs, as the history
+    /// window does; focus time counts every run.
+    private func historyJSON(from: String, to: String) -> [String: Any] {
+        let iso = ISO8601DateFormatter()
+        let records = model.history
+            .filter { $0.day >= from && $0.day <= to }
+            .sorted { $0.startedAt < $1.startedAt }
+        let runs: [[String: Any]] = records.map { record in
+            var json: [String: Any] = [
+                "day": record.day,
+                "title": record.title,
+                "started_at": iso.string(from: record.startedAt),
+                "ended_at": iso.string(from: record.endedAt),
+                "focus_minutes": Int((record.focusSeconds / 60).rounded()),
+                "outcome": record.outcome.rawValue,
+            ]
+            json["task_id"] = record.taskID?.uuidString ?? NSNull()
+            return json
+        }
+        var days: [[String: Any]] = []
+        var day: String? = from
+        while let key = day, key <= to {
+            let onDay = records.filter { $0.day == key }
+            days.append([
+                "day": key,
+                "sessions": onDay.filter { $0.outcome == .completed }.count,
+                "focus_minutes": Int((onDay.reduce(0) { $0 + $1.focusSeconds } / 60).rounded()),
+            ])
+            day = DayKey.key(byAdding: 1, to: key)
+        }
+        return ["from": from, "to": to, "days": days, "runs": runs]
+    }
+
+    /// A goal with its tasks in list order. A task counts as finished once
+    /// checked off on any day; `open` is whether it is on today's list.
+    private func goalJSON(_ goal: Goal) -> [String: Any] {
+        let today = model.todayKey
+        let steps = model.tasks.filter { $0.goalID == goal.id }
+        var json: [String: Any] = [
+            "id": goal.id.uuidString,
+            "title": goal.title,
+            "done_when": goal.doneWhen,
+            "priority": Self.priorityNames[goal.priority] ?? "medium",
+            "created_at": ISO8601DateFormatter().string(from: goal.createdDate),
+            "done": goal.doneAt != nil,
+            "tasks_total": steps.count,
+            "tasks_finished": steps.filter { $0.lastDoneDay != nil }.count,
+            "tasks": steps.map { task in
+                [
+                    "id": task.id.uuidString,
+                    "title": task.title,
+                    "done_when": task.doneWhen,
+                    "open": model.isOpen(task, on: today),
+                    "finished": task.lastDoneDay != nil,
+                    "sessions": model.sessionProgress(for: task, on: today).total,
+                    "sessions_done": model.sessionProgress(for: task, on: today).done,
+                ] as [String: Any]
+            },
+        ]
+        if let doneAt = goal.doneAt {
+            json["done_at"] = ISO8601DateFormatter().string(from: doneAt)
         }
         return json
     }

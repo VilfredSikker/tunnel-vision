@@ -164,7 +164,7 @@ final class StatusItemController: NSObject {
         guard let view = popover.contentViewController?.view else { return }
         let fitting = view.fittingSize
         let width = min(max(fitting.width, 300), 380)
-        let height = min(max(fitting.height, 220), 640)
+        let height = min(max(fitting.height, 220), 800)
         popover.contentSize = NSSize(width: width, height: height)
     }
 
@@ -179,6 +179,8 @@ final class StatusItemController: NSObject {
             let item = NSMenuItem(title: "Nothing running", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
+            menu.addItem(makeItem("Short break", #selector(quickShortBreak)))
+            menu.addItem(makeItem("Long break", #selector(quickLongBreak)))
         case .work:
             menu.addItem(makeItem("Pause", #selector(quickPauseResume)))
         case .paused:
@@ -259,6 +261,16 @@ final class StatusItemController: NSObject {
 
     @objc private func quickSkipBreak() {
         model.skipBreak()
+        refreshLabel()
+    }
+
+    @objc private func quickShortBreak() {
+        model.startBreak(long: false)
+        refreshLabel()
+    }
+
+    @objc private func quickLongBreak() {
+        model.startBreak(long: true)
         refreshLabel()
     }
 

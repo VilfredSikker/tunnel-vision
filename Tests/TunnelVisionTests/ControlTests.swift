@@ -219,6 +219,140 @@ final class ControlAPITests: XCTestCase {
         XCTAssertThrowsError(try call("session.stop"))
     }
 
+    func testTasksCarryPriorityAndStateCarriesTheSort() throws {
+        let added = task(try call("tasks.add", ["title": "Urgent", "priority": "High"]))
+        XCTAssertEqual(added["priority"] as? String, "high")
+        XCTAssertNotNil(added["created_at"])
+        let plain = task(try call("tasks.add", ["title": "Plain"]))
+        XCTAssertEqual(plain["priority"] as? String, "medium", "medium by default")
+
+        let id = plain["id"] as! String
+        XCTAssertEqual(task(try call("tasks.update", ["id": id, "priority": "low"]))["priority"] as? String, "low")
+        XCTAssertEqual(task(try call("tasks.update", ["id": id, "priority": 1]))["priority"] as? String, "high")
+        XCTAssertEqual(task(try call("tasks.update", ["id": id, "title": "Renamed"]))["priority"] as? String, "high", "left alone when not given")
+        XCTAssertThrowsError(try call("tasks.add", ["title": "Bad", "priority": "urgent"]))
+        XCTAssertThrowsError(try call("tasks.update", ["id": id, "priority": 4]))
+        XCTAssertEqual((try call("tasks.list")["tasks"] as? [[String: Any]])?.map { $0["priority"] as? String }, ["high", "high"])
+
+        XCTAssertEqual((try call("state.get")["state"] as? [String: Any])?["task_sort"] as? String, "manual")
+        var sorted = model.settings
+        sorted.taskSort = .priority
+        model.updateSettings(sorted)
+        XCTAssertEqual((try call("state.get")["state"] as? [String: Any])?["task_sort"] as? String, "priority")
+    }
+
+    func testNextUpFollowsTheSortThePanelShows() throws {
+        _ = try call("tasks.add", ["title": "Medium"])
+        _ = try call("tasks.add", ["title": "High", "priority": "high"])
+        var state = try call("state.get")["state"] as? [String: Any] ?? [:]
+        XCTAssertEqual((state["next_up"] as? [String: Any])?["title"] as? String, "Medium", "manual: list order")
+        var sorted = model.settings
+        sorted.taskSort = .priority
+        model.updateSettings(sorted)
+        state = try call("state.get")["state"] as? [String: Any] ?? [:]
+        XCTAssertEqual((state["next_up"] as? [String: Any])?["title"] as? String, "High")
+    }
+
+    func testDuplicatesCountAsSessionsAndDoneWhenCarries() throws {
+        let added = task(try call("tasks.add", ["title": "Read the RFC", "duration_minutes": 25, "done_when": "Open questions answered"]))
+        XCTAssertEqual(added["sessions"] as? Int, 1, "one session until duplicated")
+        XCTAssertEqual(added["sessions_done"] as? Int, 0)
+        XCTAssertEqual(added["done_when"] as? String, "Open questions answered")
+        let id = added["id"] as! String
+
+        let copy = task(try call("tasks.duplicate", ["id": id]))
+        XCTAssertNotEqual(copy["id"] as? String, id)
+        XCTAssertEqual(copy["sessions"] as? Int, 2)
+        XCTAssertEqual(copy["open"] as? Bool, true)
+        XCTAssertThrowsError(try call("tasks.duplicate", ["id": UUID().uuidString]))
+
+        _ = try call("session.start", ["id": id])
+        now = now.addingTimeInterval(25 * 60)
+        model.tick()
+        let listed = try call("tasks.list")["tasks"] as? [[String: Any]] ?? []
+        let original = listed.first { $0["id"] as? String == id }
+        XCTAssertEqual(original?["open"] as? Bool, false, "a run-out checks it off")
+        for entry in listed where entry["title"] as? String == "Read the RFC" {
+            XCTAssertEqual(entry["sessions"] as? Int, 2)
+            XCTAssertEqual(entry["sessions_done"] as? Int, 1, "every task in the series reads 1/2")
+        }
+
+        let updated = task(try call("tasks.update", ["id": id, "done_when": "Notes sent"]))
+        XCTAssertEqual(updated["done_when"] as? String, "Notes sent")
+    }
+
+    func testDuplicateToolRoutesToTasksDuplicate() throws {
+        let routed = try XCTUnwrap(ControlTools.route(tool: "tunnelvision_duplicate_task", arguments: ["id": "x"]))
+        XCTAssertEqual(routed.method, "tasks.duplicate")
+        XCTAssertEqual(routed.params["id"] as? String, "x")
+    }
+
+    func testGoalsAddListUpdateDelete() throws {
+        let goal = try call("goals.add", ["title": "Ship the PoC", "done_when": "Demo given", "priority": "high"])["goal"] as? [String: Any] ?? [:]
+        XCTAssertEqual(goal["title"] as? String, "Ship the PoC")
+        XCTAssertEqual(goal["priority"] as? String, "high")
+        let goalID = goal["id"] as! String
+
+        let step = task(try call("tasks.add", ["title": "Write the spec", "goal": "ship the poc"]))
+        XCTAssertEqual((step["goal"] as? [String: Any])?["id"] as? String, goalID, "goal titles match case-insensitively")
+        let other = task(try call("tasks.add", ["title": "Elsewhere"]))
+        XCTAssertTrue(other["goal"] is NSNull)
+        XCTAssertThrowsError(try call("tasks.add", ["title": "Lost", "goal": "No such goal"]))
+        _ = try call("tasks.set_done", ["id": step["id"] as! String])
+
+        let listed = (try call("goals.list")["goals"] as? [[String: Any]])?.first ?? [:]
+        XCTAssertEqual(listed["tasks_total"] as? Int, 1)
+        XCTAssertEqual(listed["tasks_finished"] as? Int, 1)
+        XCTAssertEqual((listed["tasks"] as? [[String: Any]])?.first?["title"] as? String, "Write the spec")
+
+        let moved = task(try call("tasks.update", ["id": other["id"] as! String, "goal": goalID]))
+        XCTAssertEqual((moved["goal"] as? [String: Any])?["title"] as? String, "Ship the PoC")
+        XCTAssertTrue(task(try call("tasks.update", ["id": other["id"] as! String, "goal": ""]))["goal"] is NSNull, "an empty goal detaches")
+
+        let finished = try call("goals.update", ["goal": goalID, "title": "Ship it", "done": true])["goal"] as? [String: Any] ?? [:]
+        XCTAssertEqual(finished["title"] as? String, "Ship it")
+        XCTAssertEqual(finished["done"] as? Bool, true)
+        XCTAssertNotNil(finished["done_at"])
+        XCTAssertThrowsError(try call("goals.update", ["title": "No goal named"]), "goal is required")
+
+        XCTAssertEqual(try call("goals.delete", ["goal": "Ship it"])["deleted"] as? String, goalID)
+        XCTAssertNil(model.tasks.first { $0.title == "Write the spec" }?.goalID, "its tasks stay, outside any goal")
+    }
+
+    func testHistoryListsRunsAndDailyTotals() throws {
+        let id = task(try call("tasks.add", ["title": "Focus", "duration_minutes": 25]))["id"] as! String
+        _ = try call("session.start", ["id": id])
+        now = now.addingTimeInterval(20 * 60)
+        _ = try call("session.done")
+        _ = try call("session.skip_break")
+        _ = try call("session.start", ["id": id])
+        now = now.addingTimeInterval(10 * 60)
+        _ = try call("session.stop")
+
+        let today = model.todayKey
+        let history = try call("history.list")
+        XCTAssertEqual(history["to"] as? String, today)
+        XCTAssertEqual(history["from"] as? String, DayKey.key(byAdding: -6, to: today), "the last 7 days by default")
+        let days = history["days"] as? [[String: Any]] ?? []
+        XCTAssertEqual(days.count, 7, "empty days are listed too")
+        XCTAssertEqual(days.last?["day"] as? String, today)
+        XCTAssertEqual(days.last?["sessions"] as? Int, 1, "only the completed run counts as a session")
+        XCTAssertEqual(days.last?["focus_minutes"] as? Int, 30, "focus time counts every run")
+        let runs = history["runs"] as? [[String: Any]] ?? []
+        XCTAssertEqual(runs.map { $0["outcome"] as? String }, ["completed", "stopped"])
+        XCTAssertEqual(runs.first?["title"] as? String, "Focus")
+        XCTAssertEqual(runs.first?["task_id"] as? String, id)
+        XCTAssertEqual(runs.first?["focus_minutes"] as? Int, 20)
+
+        let yesterday = DayKey.key(byAdding: -1, to: today)!
+        let past = try call("history.list", ["from": yesterday, "to": yesterday])
+        XCTAssertEqual((past["runs"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual((past["days"] as? [[String: Any]])?.count, 1)
+        XCTAssertThrowsError(try call("history.list", ["from": today, "to": yesterday]))
+        XCTAssertThrowsError(try call("history.list", ["from": "2020-01-01", "to": today]), "at most a year")
+        XCTAssertThrowsError(try call("history.list", ["from": "yesterday"]))
+    }
+
     func testUnknownMethodAndBadIds() {
         XCTAssertThrowsError(try call("nope.nothing")) { error in
             XCTAssertEqual((error as? ControlError)?.code, -32601)

@@ -245,6 +245,32 @@ struct BreakHeader: View {
     }
 }
 
+/// Nothing running: take a break by hand, short or long.
+struct BreakButtons: View {
+    let model: AppState
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                model.startBreak(long: false)
+            } label: {
+                Label("Short break", systemImage: "cup.and.saucer")
+                    .frame(maxWidth: .infinity)
+            }
+            .help("Take a \(TimeFormat.minutes(model.settings.breakSeconds)) break")
+            Button {
+                model.startBreak(long: true)
+            } label: {
+                Label("Long break", systemImage: "cup.and.heat.waves")
+                    .frame(maxWidth: .infinity)
+            }
+            .help("Take a \(TimeFormat.minutes(model.settings.longBreakSeconds)) break")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+}
+
 /// Stop with friction: hold two seconds (design constraint, early stop).
 /// Mouse users hold; keyboard users focus the button and hold Space or
 /// Return — the same two-second hold, so the friction is equal for both.
