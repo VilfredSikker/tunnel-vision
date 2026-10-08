@@ -1,0 +1,11 @@
+{
+  "name": "tunnelvision-mod",
+  "version": "0.2.0",
+  "description": "Tunnel Vision's focus timer inside Claude Code: status line, /tv commands, a task pane with an end-of-session check-in, and the current task in Claude's system prompt",
+  "author": {
+    "name": "Vilfred Sikker"
+  },
+  "repository": "https://github.com/VilfredSikker/tunnel-vision",
+  "keywords": ["focus", "pomodoro", "tasks", "status line"],
+  "types": "./types/index.d.ts"
+}
