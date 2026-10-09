@@ -13,7 +13,7 @@ public enum ControlTools {
         ),
         MCPTool(
             name: "tunnelvision_list_tasks",
-            description: "List the tasks in list order for a day (today unless `day` is given as yyyy-MM-dd). Each has id, title, duration, preset, goal, allowlist rules, priority (high, medium or low), created_at, done_when (the outcome that finishes it), sessions (how many tasks share its series: it and its copies) against sessions_done (those checked off; per day for a repeating task), whether it repeats daily, whether it was done on the day, and whether it is open (on the day's list as the app shows it; a one-off checked off on an earlier day is not).",
+            description: "List the tasks in list order for a day (today unless `day` is given as yyyy-MM-dd). Each has id, title, duration, preset, goal, allowlist rules, priority (high, medium or low), created_at, done_when (the outcome that finishes it), urls_to_open (pages opened when a focus session starts), sessions (how many tasks share its series: it and its copies) against sessions_done (those checked off; per day for a repeating task), whether it repeats daily, whether it was done on the day, and whether it is open (on the day's list as the app shows it; a one-off checked off on an earlier day is not).",
             inputSchema: object(["day": string("Day key yyyy-MM-dd; defaults to today")])
         ),
         MCPTool(
@@ -27,6 +27,7 @@ public enum ControlTools {
                 "repeat_daily": boolean("True to keep the task on the list every day after it is checked off"),
                 "priority": priority,
                 "done_when": doneWhen,
+                "urls_to_open": urlsToOpen,
                 "goal": string("Goal title or id this task is a step toward"),
                 "background": boolean(backgroundDescription),
                 "assign_to": string(assignToDescription),
@@ -34,7 +35,7 @@ public enum ControlTools {
         ),
         MCPTool(
             name: "tunnelvision_update_task",
-            description: "Change a task's title, duration, preset, priority, done_when, its own rules (the rules replace the task's existing extra rules), whether it repeats daily, or whether it is a background task and which agent it goes to. Pass an empty string as `preset` to detach the preset. A running task relocks at once.",
+            description: "Change a task's title, duration, preset, priority, done_when, urls_to_open, its own rules (the rules replace the task's existing extra rules), whether it repeats daily, or whether it is a background task and which agent it goes to. Pass an empty string as `preset` to detach the preset. A running task relocks at once.",
             inputSchema: object([
                 "id": string("Task id"),
                 "title": string("New title"),
@@ -44,6 +45,7 @@ public enum ControlTools {
                 "repeat_daily": boolean("True to keep the task on the list every day after it is checked off"),
                 "priority": priority,
                 "done_when": doneWhen,
+                "urls_to_open": urlsToOpen,
                 "goal": string("Goal title or id, or an empty string to take the task out of its goal"),
                 "background": boolean("True to hand the task to a Claude Code agent (your own herdr pane unless assign_to says otherwise), false to make it an ordinary focus task again"),
                 "assign_to": string("herdr pane id or workspace label of the agent to send it to, or an empty string to unassign; a task already sent keeps its agent"),
@@ -245,6 +247,10 @@ public enum ControlTools {
 
     private static var doneWhen: [String: Any] {
         string("The outcome that makes the task finished, checkable at the end of a session, e.g. \"PR opened\" or \"all 5 open questions answered in the doc\"")
+    }
+
+    private static var urlsToOpen: [String: Any] {
+        array(["type": "string"], "URLs opened in the browser when a focus session starts on the task, after its preset's own; a bare host such as github.com/you/repo is https, and only http and https open. Ignored for background tasks. In an update the list replaces the task's URLs")
     }
 
     private static var priority: [String: Any] {

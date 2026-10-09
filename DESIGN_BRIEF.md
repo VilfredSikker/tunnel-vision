@@ -70,7 +70,7 @@ and dark appearance.
 
 - List of presets with built-ins marked. Built-ins to ship: Coding, Writing, Comms,
   Reading.
-- Preset detail: name, mode, rule list, URLs to open when a task starts. Rules are
+- Preset detail: name, mode, rule list, URLs to open when a task starts (a task can add its own in the task editor). Rules are
   editable inline with scope and pattern fields. "Pick visually" opens the overlay
   pre-filled with the preset's rules.
 - Duplicate, rename, delete. Built-ins can be duplicated and edited, not deleted.
@@ -112,7 +112,7 @@ and dark appearance.
 ## Design constraints
 
 - Native macOS look, SF Symbols, system materials in the popover, system fonts.
-- Popover width around 340 points, height grows with the task list up to a limit.
+- Popover width around 440 points, height grows with the task list up to a limit.
 - Overlay must work on multiple displays and with many windows, forty or more.
 - Light and dark appearance throughout, including the overlay.
 - Keyboard first: every action in the popover and overlay reachable without a mouse.

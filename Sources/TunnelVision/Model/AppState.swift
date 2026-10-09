@@ -53,10 +53,34 @@ final class AppState {
     var activeLock: (rules: [Rule], mode: Mode)? {
         guard phase == .work, let task = activeTask else { return nil }
         if task.presetID != nil {
-            return (effectiveRules(for: task), activePreset?.mode ?? settings.defaultMode)
+            return (allowingStartURLs(effectiveRules(for: task), for: task), activePreset?.mode ?? settings.defaultMode)
         }
         guard !task.overrides.isEmpty else { return nil }
-        return (effectiveRules(for: task), settings.defaultMode)
+        return (allowingStartURLs(effectiveRules(for: task), for: task), settings.defaultMode)
+    }
+
+    /// The pages a starting task opens must stay open: every browser the rules
+    /// already limit by site also gets each opened page (its host and path,
+    /// not the whole site), unless a rule already covers it, so the enforcer
+    /// does not send the new tab back. Whole-app and open sessions need nothing.
+    private func allowingStartURLs(_ rules: [Rule], for task: TaskItem) -> [Rule] {
+        let pages = startURLs(for: task).compactMap { url -> (pattern: String, url: String)? in
+            guard let parts = URLPattern.parse(url: url.absoluteString) else { return nil }
+            let host = parts.host.hasPrefix("www.") ? String(parts.host.dropFirst(4)) : parts.host
+            return (host + parts.path, url.absoluteString)
+        }
+        guard !pages.isEmpty else { return rules }
+        var result = rules
+        let browsers = Set(rules.filter { $0.scope == .url && $0.effect == .allow }.map(\.bundleID))
+        for bundleID in browsers.sorted() {
+            for page in pages {
+                let covered = result.contains { $0.bundleID == bundleID && $0.scope == .url && $0.effect == .allow && URLPattern.matches($0.pattern, url: page.url) }
+                if !covered {
+                    result.append(Rule(bundleID: bundleID, scope: .url, pattern: page.pattern))
+                }
+            }
+        }
+        return result
     }
     // MARK: Persisted data
 
@@ -279,7 +303,8 @@ final class AppState {
         priority: Int = 2,
         doneWhen: String = "",
         goalID: Goal.ID? = nil,
-        background: BackgroundInfo? = nil
+        background: BackgroundInfo? = nil,
+        urlsToOpen: [String] = []
     ) -> TaskItem {
         let task = TaskItem(
             title: title.trimmingCharacters(in: .whitespaces),
@@ -291,7 +316,8 @@ final class AppState {
             createdDate: clock(),
             doneWhen: doneWhen.trimmingCharacters(in: .whitespacesAndNewlines),
             goalID: goal(id: goalID)?.id,
-            background: background
+            background: background,
+            urlsToOpen: Self.cleanedURLs(urlsToOpen)
         )
         tasks.append(task)
         if phase == .breakTime {
@@ -310,6 +336,7 @@ final class AppState {
         updated.overrides = task.overrides.filter(\.isComplete)
         updated.goalID = goal(id: task.goalID)?.id
         updated.doneWhen = task.doneWhen.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.urlsToOpen = Self.cleanedURLs(task.urlsToOpen)
         updated.background = Self.mergedBackground(edited: task.background, stored: tasks[index].background)
         tasks[index] = updated
         persist()
@@ -770,26 +797,56 @@ final class AppState {
         persist()
         Self.log.info("session started: task=\(task.title, privacy: .public) duration=\(Int(self.workTotal))s mode=\(self.activePreset?.mode.displayName ?? "none", privacy: .public)")
         notifyLockChange()
-        openPresetURLs(for: task)
+        openURLs(for: task)
         onSessionStarted?(task)
         startBackgroundWork()
     }
 
-    /// The preset's "URLs to open when a task starts" (DESIGN_BRIEF §4).
-    /// Entries without a scheme are treated as https.
-    private func openPresetURLs(for task: TaskItem) {
-        guard let presetID = task.presetID, let preset = presets.first(where: { $0.id == presetID }) else { return }
-        let urls = preset.urlsToOpen.compactMap(Self.openableURL)
+    /// The preset's "URLs to open when a task starts" (DESIGN_BRIEF §4) and
+    /// the task's own, in one batch, repeats dropped. Entries without a scheme
+    /// are treated as https.
+    private func openURLs(for task: TaskItem) {
+        let urls = startURLs(for: task)
         guard !urls.isEmpty else { return }
         urlOpener?(urls)
     }
 
+    /// What starting the task opens: its preset's URLs, then its own.
+    private func startURLs(for task: TaskItem) -> [URL] {
+        let preset = task.presetID.flatMap { id in presets.first { $0.id == id } }
+        var seen = Set<URL>()
+        return ((preset?.urlsToOpen ?? []) + task.urlsToOpen)
+            .compactMap(Self.openableURL)
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// A warning when the pages the task opens would land in a browser its lock
+    /// does not let through: the page opens in the default browser and the
+    /// enforcer then hides or closes it. Only an app or site allow rule saves it.
+    func startURLWarning(for task: TaskItem, defaultBrowserBundleID: String?, browserName: String) -> String? {
+        guard let lock = activeLock, let bundleID = defaultBrowserBundleID, !startURLs(for: task).isEmpty else { return nil }
+        let letsThrough = lock.rules.contains { $0.bundleID == bundleID && $0.effect == .allow && ($0.scope == .app || $0.scope == .url) }
+        return letsThrough ? nil : "\(browserName) is not allowed, so the pages this task opens may be closed"
+    }
+
+    /// Entries trimmed, blanks dropped.
+    static func cleanedURLs(_ entries: [String]) -> [String] {
+        entries.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    /// One URL per line, as the task editor shows and reads them.
+    static func urlLines(_ text: String) -> [String] {
+        cleanedURLs(text.components(separatedBy: .newlines))
+    }
+
+    /// Web pages only: a task or preset can come from an agent, and other
+    /// schemes (file, smb, app deep links) would launch things.
     static func openableURL(_ text: String) -> URL? {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
         let withScheme = trimmed.contains("://") ? trimmed : "https://" + trimmed
         guard let url = URL(string: withScheme, encodingInvalidCharacters: false),
-              url.scheme != nil, url.host != nil else { return nil }
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https", url.host != nil else { return nil }
         return url
     }
 

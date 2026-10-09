@@ -35,6 +35,16 @@ final class ControlAPITests: XCTestCase {
         result["task"] as? [String: Any] ?? [:]
     }
 
+    func testTaskURLsRoundTripThroughAddAndUpdate() throws {
+        let added = task(try call("tasks.add", ["title": "Read", "urls_to_open": ["example.com/a", " "]]))
+        XCTAssertEqual(added["urls_to_open"] as? [String], ["example.com/a"])
+        let id = added["id"] as! String
+        let updated = task(try call("tasks.update", ["id": id, "urls_to_open": ["b.com"]]))
+        XCTAssertEqual(updated["urls_to_open"] as? [String], ["b.com"])
+        let untouched = task(try call("tasks.update", ["id": id, "title": "Read more"]))
+        XCTAssertEqual(untouched["urls_to_open"] as? [String], ["b.com"], "an update without urls keeps them")
+    }
+
     func testTasksAddListUpdateDoneDelete() throws {
         let added = task(try call("tasks.add", [
             "title": "  Write docs ",

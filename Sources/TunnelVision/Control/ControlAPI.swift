@@ -50,11 +50,12 @@ final class ControlAPI {
             let repeatDaily = params["repeat_daily"] as? Bool ?? false
             let priority = try priorityParam(params["priority"]) ?? 2
             let doneWhen = params["done_when"] as? String ?? ""
+            let urls = params["urls_to_open"] as? [String] ?? []
             let goalID = try goalParam(params["goal"])?.id
             // `assign_to` alone makes a background task too.
             let wantsBackground = params["background"] as? Bool ?? (params["assign_to"] is String)
             let background = wantsBackground ? BackgroundInfo(assignee: try assigneeParam(params)) : nil
-            let task = model.addTask(title: title, durationSeconds: TimeInterval(minutes * 60), presetID: presetID, overrides: rules, repeatDaily: repeatDaily, priority: priority, doneWhen: doneWhen, goalID: goalID, background: background)
+            let task = model.addTask(title: title, durationSeconds: TimeInterval(minutes * 60), presetID: presetID, overrides: rules, repeatDaily: repeatDaily, priority: priority, doneWhen: doneWhen, goalID: goalID, background: background, urlsToOpen: urls)
             return ["task": taskJSON(task, day: model.todayKey)]
 
         case "tasks.update":
@@ -80,6 +81,9 @@ final class ControlAPI {
             }
             if let doneWhen = params["done_when"] as? String {
                 task.doneWhen = doneWhen
+            }
+            if let urls = params["urls_to_open"] as? [String] {
+                task.urlsToOpen = urls
             }
             if params.keys.contains("goal") {
                 task.goalID = try goalParam(params["goal"])?.id
@@ -523,6 +527,7 @@ final class ControlAPI {
             "sessions": model.sessionProgress(for: task, on: day).total,
             "sessions_done": model.sessionProgress(for: task, on: day).done,
             "done_when": task.doneWhen,
+            "urls_to_open": task.urlsToOpen,
             "active": task.id == model.activeTaskID,
         ]
         if task.createdDate != .distantPast {

@@ -22,6 +22,7 @@ struct TaskEditorView: View {
     @State private var isBackground: Bool
     @State private var doneWhen: String
     @State private var assignee: AgentRef?
+    @State private var urlsText: String
 
     init(model: AppState, task: TaskItem?) {
         self.model = model
@@ -36,6 +37,7 @@ struct TaskEditorView: View {
         _isBackground = State(initialValue: task?.isBackground ?? false)
         _doneWhen = State(initialValue: task?.doneWhen ?? "")
         _assignee = State(initialValue: task?.background?.assignee)
+        _urlsText = State(initialValue: (task?.urlsToOpen ?? []).joined(separator: "\n"))
     }
 
     private var isEditing: Bool { task != nil }
@@ -111,6 +113,10 @@ struct TaskEditorView: View {
                 }
                 .pickerStyle(.segmented)
                 Spacer()
+            }
+
+            if !isBackground {
+                urlsSection
             }
 
             if !isBackground {
@@ -287,6 +293,22 @@ struct TaskEditorView: View {
         .controlSize(.small)
     }
 
+    /// One URL per line, opened when the task starts (after the preset's own).
+    private var urlsSection: some View {
+        HStack(alignment: .top) {
+            Text("Open")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 60, alignment: .leading)
+                .padding(.top, 4)
+            TextEditor(text: $urlsText)
+                .font(.callout.monospaced())
+                .frame(height: 54)
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.3)))
+                .help("URLs to open when the task starts, one per line, e.g. github.com/you/repo")
+        }
+    }
+
     // MARK: Allowlist
 
     @ViewBuilder
@@ -385,6 +407,7 @@ struct TaskEditorView: View {
         guard !trimmed.isEmpty else { return }
         // The model keeps the run state of a task already out; the editor
         // only decides whether it is background and who it goes to.
+        let urls = AppState.urlLines(urlsText)
         var background: BackgroundInfo?
         if isBackground {
             background = task?.background ?? BackgroundInfo()
@@ -398,6 +421,7 @@ struct TaskEditorView: View {
             updated.overrides = overrides
             updated.repeatDaily = repeatDaily
             updated.priority = priority
+            updated.urlsToOpen = urls
             if isBackground {
                 updated.doneWhen = doneWhen
             }
@@ -412,7 +436,8 @@ struct TaskEditorView: View {
                 repeatDaily: repeatDaily,
                 priority: priority,
                 doneWhen: isBackground ? doneWhen : "",
-                background: background
+                background: background,
+                urlsToOpen: urls
             )
         }
         dismiss()

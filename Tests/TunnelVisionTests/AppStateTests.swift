@@ -577,6 +577,106 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(opened.count, 1, "a task without a preset opens nothing")
     }
 
+    func testOnlyWebURLsOpen() {
+        XCTAssertNil(AppState.openableURL("file://localhost/Applications/Calculator.app"))
+        XCTAssertNil(AppState.openableURL("smb://host/share"))
+        XCTAssertNil(AppState.openableURL("vscode://file/x"))
+        XCTAssertEqual(AppState.openableURL("github.com/x"), URL(string: "https://github.com/x"))
+        XCTAssertEqual(AppState.openableURL("HTTP://example.com"), URL(string: "HTTP://example.com"))
+    }
+
+    func testTheEditorsURLTextBecomesTrimmedLines() {
+        XCTAssertEqual(AppState.urlLines("a.com\n\n b.com \r\nc.com\n"), ["a.com", "b.com", "c.com"])
+        XCTAssertEqual(AppState.urlLines(["a.com", "b.com"].joined(separator: "\n")), ["a.com", "b.com"])
+        XCTAssertEqual(AppState.urlLines(""), [])
+    }
+
+    func testAURLTheTaskOpensIsAllowedInItsBrowserLock() {
+        let state = makeState()
+        let browser = "net.imput.helium"
+        var preset = state.preset(named: "Coding")!
+        preset.rules = [Rule(bundleID: browser, scope: .url, pattern: "github.com"), Rule(bundleID: "com.apple.Terminal")]
+        preset.urlsToOpen = ["docs.rs/x"]
+        state.updatePreset(preset)
+        let task = state.addTask(title: "A", durationSeconds: 60, presetID: preset.id, overrides: [], urlsToOpen: ["https://www.linear.app/team/1?x=1", "github.com/me", "youtube.com"])
+        state.startTask(id: task.id)
+        let rules = state.activeLock?.rules ?? []
+        let sites = rules.filter { $0.bundleID == browser && $0.scope == .url }.map(\.pattern)
+        XCTAssertEqual(sites, ["github.com", "docs.rs/x", "linear.app/team/1", "youtube.com"], "each opened page joins the browser's rules at its own path, once, unless a rule covers it")
+        XCTAssertEqual(rules.filter { $0.bundleID == "com.apple.Terminal" }.count, 1, "other apps are untouched")
+        XCTAssertEqual(state.effectiveRules(for: task).filter { $0.bundleID == browser }.count, 1, "the stored rules stay as written")
+    }
+
+    func testOpenedPagesDoNotWidenTheLockToTheWholeSite() {
+        let state = makeState()
+        let browser = "net.imput.helium"
+        let task = state.addTask(title: "A", durationSeconds: 60, presetID: nil, overrides: [Rule(bundleID: browser, scope: .url, pattern: "github.com/org/work")], urlsToOpen: ["youtube.com/watch?v=x"])
+        state.startTask(id: task.id)
+        let patterns = (state.activeLock?.rules ?? []).filter { $0.bundleID == browser }.map(\.pattern)
+        XCTAssertEqual(patterns, ["github.com/org/work", "youtube.com/watch"], "a no-preset task with its own rules gets the page, not all of youtube.com")
+        XCTAssertFalse(URLPattern.matchesAny(patterns, url: "https://youtube.com/feed"))
+        XCTAssertTrue(URLPattern.matchesAny(patterns, url: "https://youtube.com/watch?v=x"))
+    }
+
+    func testWarnsWhenTheDefaultBrowserCannotKeepTheOpenedPages() {
+        let state = makeState()
+        let browser = "com.apple.Safari"
+        func warning(_ rules: [Rule], urls: [String]) -> String? {
+            let task = state.addTask(title: "A", durationSeconds: 60, presetID: nil, overrides: rules, urlsToOpen: urls)
+            state.startTask(id: task.id)
+            defer { state.stopNow() }
+            return state.startURLWarning(for: task, defaultBrowserBundleID: browser, browserName: "Safari")
+        }
+        let other = Rule(bundleID: "com.apple.Terminal")
+        XCTAssertNotNil(warning([other], urls: ["example.com"]), "browser not in the rules")
+        XCTAssertNotNil(warning([other, Rule(bundleID: browser, scope: .window, pattern: "Docs")], urls: ["example.com"]), "window rules do not keep a new page")
+        XCTAssertNil(warning([other, Rule(bundleID: browser)], urls: ["example.com"]), "whole app allowed")
+        XCTAssertNil(warning([other, Rule(bundleID: browser, scope: .url, pattern: "github.com")], urls: ["example.com"]), "site rules gain the page")
+        XCTAssertNil(warning([other], urls: []), "nothing to open")
+    }
+
+    func testAWholeAppBrowserRuleGetsNoSiteRules() {
+        let state = makeState()
+        let browser = "net.imput.helium"
+        let task = state.addTask(title: "A", durationSeconds: 60, presetID: nil, overrides: [Rule(bundleID: browser)], urlsToOpen: ["example.com/read"])
+        state.startTask(id: task.id)
+        XCTAssertEqual((state.activeLock?.rules ?? []).filter { $0.bundleID == browser }.count, 1)
+    }
+
+    func testStartingATaskOpensItsOwnURLsAfterThePresetsWithoutRepeats() {
+        let state = makeState()
+        var opened: [[URL]] = []
+        state.urlOpener = { opened.append($0) }
+        var coding = state.preset(named: "Coding")!
+        coding.urlsToOpen = ["github.com/me/repo"]
+        state.updatePreset(coding)
+        let withPreset = state.addTask(title: "A", durationSeconds: 60, presetID: coding.id, overrides: [], urlsToOpen: [" docs.swift.org ", "", "https://github.com/me/repo"])
+        let plain = state.addTask(title: "B", durationSeconds: 60, presetID: nil, overrides: [], urlsToOpen: ["example.com/read"])
+        XCTAssertEqual(withPreset.urlsToOpen, ["docs.swift.org", "https://github.com/me/repo"], "blanks dropped, entries trimmed")
+
+        state.startTask(id: withPreset.id)
+        XCTAssertEqual(opened, [[URL(string: "https://github.com/me/repo")!, URL(string: "https://docs.swift.org")!]])
+
+        state.stopNow()
+        state.startTask(id: plain.id)
+        XCTAssertEqual(opened.last, [URL(string: "https://example.com/read")!], "a task without a preset still opens its own")
+    }
+
+    func testTaskURLsSurviveEditsCopiesAndOldArchives() throws {
+        let state = makeState()
+        var task = state.addTask(title: "A", durationSeconds: 60, presetID: nil, overrides: [], urlsToOpen: ["a.com"])
+        XCTAssertEqual(task.repeatedCopy().urlsToOpen, ["a.com"])
+        task.urlsToOpen = [" b.com ", " "]
+        state.updateTask(task)
+        XCTAssertEqual(state.tasks.first?.urlsToOpen, ["b.com"])
+
+        let data = try JSONEncoder().encode(task)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        json["urlsToOpen"] = nil
+        let old = try JSONDecoder().decode(TaskItem.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(old.urlsToOpen, [])
+    }
+
     /// Task, small, task, small, task, long, then the cycle starts over.
     func testEveryThirdSessionInARowEarnsTheLongBreak() {
         let state = makeState()

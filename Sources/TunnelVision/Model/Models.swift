@@ -161,6 +161,9 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
     /// Set when the task is handed to a Claude Code agent in a herdr pane
     /// instead of being worked in a focus session. Nil: an ordinary task.
     var background: BackgroundInfo?
+    /// URLs opened when the task starts, one per entry; scheme-less entries
+    /// are https. Opened together with the preset's own.
+    var urlsToOpen: [String]
 
     init(
         id: UUID = UUID(),
@@ -176,7 +179,8 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
         seriesID: UUID? = nil,
         doneWhen: String = "",
         goalID: UUID? = nil,
-        background: BackgroundInfo? = nil
+        background: BackgroundInfo? = nil,
+        urlsToOpen: [String] = []
     ) {
         self.id = id
         self.title = title
@@ -192,6 +196,7 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
         self.doneWhen = doneWhen
         self.goalID = goalID
         self.background = background
+        self.urlsToOpen = urlsToOpen
     }
 
     var isBackground: Bool { background != nil }
@@ -247,18 +252,19 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
             seriesID: seriesID,
             doneWhen: doneWhen,
             goalID: goalID,
-            background: background.map { BackgroundInfo(assignee: $0.assignee) }
+            background: background.map { BackgroundInfo(assignee: $0.assignee) },
+            urlsToOpen: urlsToOpen
         )
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, durationSeconds, presetID, overrides, doneDays, doneAt, repeatDaily, priority, createdDate, seriesID, doneWhen, goalID, background
+        case id, title, durationSeconds, presetID, overrides, doneDays, doneAt, repeatDaily, priority, createdDate, seriesID, doneWhen, goalID, background, urlsToOpen
     }
 }
 
 extension TaskItem {
     /// `doneAt`, `repeatDaily`, `priority`, `createdDate`, `seriesID`,
-    /// `doneWhen`, `goalID` and `background` arrived after v1; older archives
+    /// `doneWhen`, `goalID`, `background` and `urlsToOpen` arrived after v1; older archives
     /// keep decoding without them.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -276,6 +282,7 @@ extension TaskItem {
         doneWhen = try container.decodeIfPresent(String.self, forKey: .doneWhen) ?? ""
         goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
         background = try container.decodeIfPresent(BackgroundInfo.self, forKey: .background)
+        urlsToOpen = try container.decodeIfPresent([String].self, forKey: .urlsToOpen) ?? []
     }
 }
 

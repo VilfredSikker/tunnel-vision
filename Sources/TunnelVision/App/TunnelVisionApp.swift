@@ -341,6 +341,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for warning in model.lockWarningMessages {
             summary += "\n⚠︎ " + warning
         }
+        if let browserURL = NSWorkspace.shared.urlForApplication(toOpen: URL(string: "https://example.com")!),
+           let browserID = Bundle(url: browserURL)?.bundleIdentifier {
+            let name = AppCatalog.displayName(forBundleID: browserID) ?? browserID
+            if let warning = model.startURLWarning(for: task, defaultBrowserBundleID: browserID, browserName: name) {
+                summary += "\n⚠︎ " + warning
+            }
+        }
         toast?.show(title: "Locked to “\(task.title)”", detail: summary, symbol: "lock.fill")
     }
 
