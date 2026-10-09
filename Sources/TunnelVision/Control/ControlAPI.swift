@@ -12,6 +12,27 @@ final class ControlAPI {
         self.model = model
     }
 
+    /// The socket's entry point. Methods that depend on herdr ask it first
+    /// (the agents list behind `assign_to`, the screen behind an answer);
+    /// everything else is `handle`.
+    func respond(method: String, params: [String: Any]) async throws -> [String: Any] {
+        switch method {
+        case "tasks.add", "tasks.update":
+            if params["background"] != nil || params["assign_to"] != nil {
+                await model.background.refreshAgents()
+            }
+        case "agents.list":
+            await model.background.refreshAgents()
+        case "approvals.answer":
+            return try await answerApproval(params)
+        default:
+            break
+        }
+        return try handle(method: method, params: params)
+    }
+
+    /// Everything that needs no herdr round trip. herdr-backed methods
+    /// read the last agents list here; `respond` refreshes it first.
     func handle(method: String, params: [String: Any]) throws -> [String: Any] {
         switch method {
         case "state.get":
@@ -30,7 +51,10 @@ final class ControlAPI {
             let priority = try priorityParam(params["priority"]) ?? 2
             let doneWhen = params["done_when"] as? String ?? ""
             let goalID = try goalParam(params["goal"])?.id
-            let task = model.addTask(title: title, durationSeconds: TimeInterval(minutes * 60), presetID: presetID, overrides: rules, repeatDaily: repeatDaily, priority: priority, doneWhen: doneWhen, goalID: goalID)
+            // `assign_to` alone makes a background task too.
+            let wantsBackground = params["background"] as? Bool ?? (params["assign_to"] is String)
+            let background = wantsBackground ? BackgroundInfo(assignee: try assigneeParam(params)) : nil
+            let task = model.addTask(title: title, durationSeconds: TimeInterval(minutes * 60), presetID: presetID, overrides: rules, repeatDaily: repeatDaily, priority: priority, doneWhen: doneWhen, goalID: goalID, background: background)
             return ["task": taskJSON(task, day: model.todayKey)]
 
         case "tasks.update":
@@ -59,6 +83,26 @@ final class ControlAPI {
             }
             if params.keys.contains("goal") {
                 task.goalID = try goalParam(params["goal"])?.id
+            }
+            if let flag = params["background"] as? Bool {
+                if !flag {
+                    task.background = nil
+                } else if task.background == nil {
+                    task.background = BackgroundInfo(assignee: try assigneeParam(params))
+                }
+            }
+            if params["assign_to"] is String {
+                // An empty value unassigns; the caller's pane is not implied here.
+                let target = (params["assign_to"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+                let assignee = target.isEmpty ? nil : try assigneeParam(params)
+                var info = task.background ?? BackgroundInfo()
+                if info.assignee != assignee {
+                    guard info.sentAt == nil else {
+                        throw ControlError.refused("the task was already sent to its agent and stays with it")
+                    }
+                    info.assignee = assignee
+                }
+                task.background = info
             }
             model.updateTask(task)
             return ["task": taskJSON(model.tasks.first { $0.id == task.id } ?? task, day: model.todayKey)]
@@ -172,6 +216,9 @@ final class ControlAPI {
 
         case "session.start":
             let task = try taskParam(params)
+            guard !task.isBackground else {
+                throw ControlError.refused("a background task goes to its agent and never runs in a focus session; start another task and it goes out with it")
+            }
             guard model.phase != .work, model.phase != .paused else {
                 throw ControlError.refused("a session is already running; pause, stop or finish it first")
             }
@@ -223,8 +270,67 @@ final class ControlAPI {
                 ] as [String: Any]
             }]
 
+        case "agents.list":
+            return [
+                "herdr_reachable": model.background.isHerdrReachable,
+                "agents": model.background.agents.map(agentJSON),
+            ]
+
+        case "background.report":
+            let task = try taskParam(params)
+            guard task.isBackground else { throw ControlError.refused("“\(task.title)” is not a background task") }
+            let summary = try requiredString("summary", in: params)
+            model.reportBackground(id: task.id, summary: summary, link: params["link"] as? String)
+            return ["task": taskJSON(model.tasks.first { $0.id == task.id } ?? task, day: model.todayKey)]
+
+        case "approvals.list":
+            return ["approvals": model.background.approvals.map(approvalJSON)]
+
+        case "approvals.answer":
+            // It reads the pane and waits on it; only `respond` can.
+            throw ControlError.refused("approvals.answer needs the socket's asynchronous path")
+
         default:
             throw ControlError.unknownMethod(method)
+        }
+    }
+
+    /// Re-checks the prompt on screen and answers it, or says why not.
+    private func answerApproval(_ params: [String: Any]) async throws -> [String: Any] {
+        let text = try requiredString("id", in: params)
+        guard let id = UUID(uuidString: text) else { throw ControlError.invalidParams("not an approval id: \(text)") }
+        let option: Int
+        if let value = params["option"] as? Int {
+            option = value
+        } else if let value = (params["option"] as? String).flatMap({ Int($0.trimmingCharacters(in: .whitespaces)) }) {
+            option = value
+        } else {
+            throw ControlError.invalidParams("option is required: the number of the choice")
+        }
+        switch await model.background.answer(approvalID: id, option: option) {
+        case .answered:
+            return ["answered": true]
+        case .stillShowing:
+            throw ControlError.refused("the keys went in but the prompt is still showing; open the pane to answer it")
+        case .refused(let reason):
+            throw ControlError.refused(reason)
+        }
+    }
+
+    /// `assign_to` (a pane id or workspace label), else the calling pane the
+    /// MCP helper passes as `caller_pane`. Nil when neither is there.
+    private func assigneeParam(_ params: [String: Any]) throws -> AgentRef? {
+        do {
+            return try model.background.resolveAssignee(
+                target: params["assign_to"] as? String,
+                callerPane: params["caller_pane"] as? String,
+                callerWorkspace: params["caller_workspace"] as? String
+            )
+        } catch BackgroundError.unknownAgent(let target) {
+            if !model.background.isHerdrReachable {
+                throw ControlError.unavailable("herdr is not reachable, so “\(target)” cannot be looked up")
+            }
+            throw ControlError.notFound("no herdr agent in a pane or workspace “\(target)”; tunnelvision_list_agents lists them")
         }
     }
 
@@ -438,7 +544,69 @@ final class ControlAPI {
         if let position {
             json["position"] = position
         }
+        json["background"] = task.background.map { backgroundJSON($0, task: task) } ?? NSNull()
         return json
+    }
+
+    private func backgroundJSON(_ info: BackgroundInfo, task: TaskItem) -> [String: Any] {
+        var json: [String: Any] = [
+            "status": Self.backgroundStatusNames[info.status] ?? info.status.rawValue,
+            "ready": model.isReadyBackground(task),
+            "summary": info.summary,
+        ]
+        json["link"] = info.link ?? NSNull()
+        json["sent_at"] = info.sentAt.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull()
+        if let assignee = info.assignee {
+            var agent: [String: Any] = [
+                "pane_id": assignee.paneID,
+                "workspace_id": assignee.workspaceID,
+                "label": assignee.label,
+            ]
+            agent["session_id"] = assignee.sessionID ?? NSNull()
+            json["assignee"] = agent
+        } else {
+            json["assignee"] = NSNull()
+        }
+        return json
+    }
+
+    /// snake_case, as everything else on the wire.
+    private static let backgroundStatusNames: [BackgroundStatus: String] = [.paneClosed: "pane_closed"]
+
+    private func agentJSON(_ agent: HerdrAgent) -> [String: Any] {
+        var json: [String: Any] = [
+            "pane_id": agent.paneID,
+            "workspace_id": agent.workspaceID,
+            "label": model.background.workspaceLabels[agent.workspaceID] ?? agent.workspaceID,
+            "status": agent.status.rawValue,
+            "focused": agent.focused,
+        ]
+        json["agent"] = agent.agent ?? NSNull()
+        json["cwd"] = agent.cwd ?? NSNull()
+        json["session_id"] = agent.sessionID ?? NSNull()
+        return json
+    }
+
+    private func approvalJSON(_ approval: PendingApproval) -> [String: Any] {
+        [
+            "id": approval.id.uuidString,
+            "pane_id": approval.paneID,
+            "task_id": approval.taskID.uuidString,
+            "task_title": model.tasks.first { $0.id == approval.taskID }?.title ?? "",
+            "title": approval.title,
+            "question": approval.question,
+            "body": approval.body,
+            "cursor": approval.options.indices.contains(approval.cursorIndex) ? approval.options[approval.cursorIndex].number : 1,
+            "options": approval.options.map { option in
+                [
+                    "number": option.number,
+                    "label": option.label,
+                    "detail": option.detail,
+                    // Opens a text field: answer it in the pane.
+                    "needs_typed_input": option.needsTypedInput,
+                ] as [String: Any]
+            },
+        ]
     }
 
     /// Every ended run between the two days, inclusive, oldest first, with a

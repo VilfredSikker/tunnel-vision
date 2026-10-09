@@ -5,10 +5,11 @@ import os
 
 /// Listens on the control socket and answers each request line through the
 /// handler. Everything runs on the main queue, so the handler can touch the
-/// model directly.
+/// model directly. The handler may suspend (a herdr call); the answer goes
+/// out when it returns.
 @MainActor
 final class ControlServer {
-    typealias Handler = @MainActor (_ method: String, _ params: [String: Any]) throws -> [String: Any]
+    typealias Handler = @MainActor (_ method: String, _ params: [String: Any]) async throws -> [String: Any]
 
     private static let log = Logger(subsystem: "com.tunnelvision.timer", category: "control")
 
@@ -22,7 +23,14 @@ final class ControlServer {
         /// ends once `pending` is out. The read source is suspended so the
         /// end-of-file does not fire again meanwhile.
         var closing = false
+        /// Requests whose answer is still being worked out.
+        var inFlight = 0
+        /// Tells this connection from a later one that reuses its descriptor,
+        /// so a late answer never reaches the wrong client.
+        let generation: Int
     }
+
+    private var nextGeneration = 0
 
     /// A client more than this far behind on reading its answers is dropped.
     private static let maxPendingBytes = 16 << 20
@@ -106,7 +114,8 @@ final class ControlServer {
         source.setCancelHandler {
             close(fd)
         }
-        clients[fd] = Client(source: source)
+        nextGeneration += 1
+        clients[fd] = Client(source: source, generation: nextGeneration)
         source.resume()
     }
 
@@ -115,7 +124,7 @@ final class ControlServer {
         var chunk = [UInt8](repeating: 0, count: 65536)
         let count = Darwin.read(fd, &chunk, chunk.count)
         if count < 0, errno == EAGAIN || errno == EINTR { return }
-        if count == 0, let client = clients[fd], !client.pending.isEmpty, !client.closing {
+        if count == 0, let client = clients[fd], !client.pending.isEmpty || client.inFlight > 0, !client.closing {
             // A half-close after the request (`nc -N`, most scripts): the
             // answer still goes out, then the connection ends.
             clients[fd]?.closing = true
@@ -145,19 +154,29 @@ final class ControlServer {
     private static let maxLineBytes = 1 << 20
 
     private func respond(to line: Data, on fd: Int32) {
-        let response: Data
-        if let request = ControlProtocol.parseRequest(line) {
+        guard let request = ControlProtocol.parseRequest(line) else {
+            deliver(ControlProtocol.errorResponse(id: nil, error: .malformed), on: fd)
+            return
+        }
+        guard let generation = clients[fd]?.generation else { return }
+        clients[fd]?.inFlight += 1
+        Task { @MainActor [weak self, handler] in
+            let response: Data
             do {
-                let result = try handler(request.method, request.params)
+                let result = try await handler(request.method, request.params)
                 response = ControlProtocol.response(id: request.id, result: result)
             } catch let error as ControlError {
                 response = ControlProtocol.errorResponse(id: request.id, error: error)
             } catch {
                 response = ControlProtocol.errorResponse(id: request.id, error: .refused(String(describing: error)))
             }
-        } else {
-            response = ControlProtocol.errorResponse(id: nil, error: .malformed)
+            guard let self, self.clients[fd]?.generation == generation else { return }
+            self.clients[fd]?.inFlight -= 1
+            self.deliver(response, on: fd)
         }
+    }
+
+    private func deliver(_ response: Data, on fd: Int32) {
         guard clients[fd] != nil else { return }
         clients[fd]?.pending.append(response)
         guard (clients[fd]?.pending.count ?? 0) <= Self.maxPendingBytes else {
@@ -204,7 +223,7 @@ final class ControlServer {
         client.writeSource?.cancel()
         client.writeSource = nil
         clients[fd] = client
-        if client.closing {
+        if client.closing, client.inFlight == 0 {
             drop(fd)
         }
     }

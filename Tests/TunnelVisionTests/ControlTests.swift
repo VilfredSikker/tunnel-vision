@@ -554,6 +554,45 @@ final class ControlSocketTests: XCTestCase {
         XCTAssertEqual((result["blob"] as? String)?.count, big.count)
     }
 
+    /// A handler that waits on herdr answers after the client has already
+    /// closed its write side: the connection stays open for the answer.
+    func testAHalfClosedClientGetsAnAnswerThatTookAWhile() async throws {
+        let path = try socketPath()
+        let server = ControlServer(path: path) { _, _ in
+            try await Task.sleep(for: .milliseconds(150))
+            return ["late": true]
+        }
+        try server.start()
+        defer { server.stop() }
+
+        let received: Data = try await Task.detached {
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            defer { close(fd) }
+            var on: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+            var address = try UnixSocketAddress.make(path: path)
+            let connected = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, UnixSocketAddress.length) }
+            }
+            guard connected == 0 else { throw ControlError.unavailable("connect") }
+            let request = ControlProtocol.request(id: "1", method: "slow", params: [:])
+            _ = request.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+            shutdown(fd, SHUT_WR)
+            var data = Data()
+            var chunk = [UInt8](repeating: 0, count: 65536)
+            while true {
+                let n = read(fd, &chunk, chunk.count)
+                guard n > 0 else { break }
+                data.append(chunk, count: n)
+            }
+            return data
+        }.value
+
+        let line = received.split(separator: 0x0A).first.map { Data($0) } ?? Data()
+        let result = try ControlProtocol.parseResponse(line)
+        XCTAssertEqual(result["late"] as? Bool, true)
+    }
+
     /// A client that hangs up before its answer (an MCP call timing out, a
     /// one-shot `nc -U`) must not take the app down with SIGPIPE: the app
     /// would die with apps still frozen.

@@ -61,10 +61,9 @@ struct SessionHeader: View {
                 Circle()
                     .trim(from: 0, to: fraction)
                     .stroke(ringColor, style: StrokeStyle(lineWidth: 7, lineCap: .round))
+                    // Not animated: the once-per-second step is too small to
+                    // see, and animating it redraws at the display's frame rate.
                     .rotationEffect(.degrees(-90))
-                    // Smooth the once-per-second ring step under the periodic
-                    // re-evaluation.
-                    .animation(.linear(duration: 0.9), value: fraction)
                 VStack(spacing: 2) {
                     Text(TimeFormat.clock(model.remainingSeconds ?? 0))
                         .font(.system(size: 34, weight: .semibold))

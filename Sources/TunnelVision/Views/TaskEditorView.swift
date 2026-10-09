@@ -1,8 +1,10 @@
 import SwiftUI
 
 /// Add or edit a task: title, duration (15/25/60 quick picks plus a minutes
-/// field), preset (pre-filled with the last used preset) and allowlist rules.
+/// field), preset (none until one is picked) and allowlist rules.
 /// The visual picker overlay replaces manual rule editing in a later build step.
+/// A background task swaps the focus rows (preset, duration, allowlist) for
+/// its done-when and the herdr agent it goes to.
 struct TaskEditorView: View {
     let model: AppState
     let task: TaskItem?
@@ -17,20 +19,31 @@ struct TaskEditorView: View {
     @State private var priority: Int
     @State private var editingRules = false
     @State private var visualPickNotice = ""
+    @State private var isBackground: Bool
+    @State private var doneWhen: String
+    @State private var assignee: AgentRef?
 
     init(model: AppState, task: TaskItem?) {
         self.model = model
         self.task = task
         _title = State(initialValue: task?.title ?? "")
         _minutes = State(initialValue: Int((task?.durationSeconds ?? 25 * 60) / 60))
-        _presetID = State(initialValue: task?.presetID ?? model.defaultPresetID)
+        _presetID = State(initialValue: task?.presetID)
         _overrides = State(initialValue: task?.overrides ?? [])
         _repeatDaily = State(initialValue: task?.repeatDaily ?? false)
         _priority = State(initialValue: task?.priority ?? 2)
         _editingRules = State(initialValue: task != nil && !(task?.overrides.isEmpty ?? true))
+        _isBackground = State(initialValue: task?.isBackground ?? false)
+        _doneWhen = State(initialValue: task?.doneWhen ?? "")
+        _assignee = State(initialValue: task?.background?.assignee)
     }
 
     private var isEditing: Bool { task != nil }
+    /// Already with its agent: the agent can no longer change.
+    private var sentStatus: BackgroundStatus? {
+        guard let info = task?.background, info.sentAt != nil else { return nil }
+        return info.status
+    }
     private var selectedPreset: Preset? {
         guard let presetID else { return nil }
         return model.presets.first { $0.id == presetID }
@@ -54,65 +67,25 @@ struct TaskEditorView: View {
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(save)
 
-            HStack {
-                Text("Preset")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 60, alignment: .leading)
-                Menu {
-                    Button("No preset") {
-                        presetID = nil
-                        overrides = []
-                    }
-                    Button("Custom allowlist") {
-                        presetID = nil
-                        editingRules = true
-                    }
-                    Divider()
-                    ForEach(model.presets) { preset in
-                        Button(preset.name) {
-                            presetID = preset.id
-                        }
-                    }
-                } label: {
-                    HStack {
-                        Text(selectedPreset?.name ?? presetMenuFallback)
-                            .foregroundStyle(.primary)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().stroke(Color.secondary.opacity(0.35), lineWidth: 1))
+            Toggle(isOn: $isBackground) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Run in the background")
+                        .font(.callout)
+                    Text("A Claude Code agent in herdr works on it while you focus.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .menuStyle(.borderlessButton)
-                Spacer()
             }
+            .toggleStyle(.checkbox)
+            // An agent working on it keeps it; turning it back into a focus
+            // task would leave its prompts without a row.
+            .disabled(sentStatus?.holdsPane == true)
+            .help(sentStatus?.holdsPane == true ? "Its agent is working on it" : "")
 
-            HStack {
-                Text("Duration")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 60, alignment: .leading)
-                HStack(spacing: 6) {
-                    durationChip(15)
-                    durationChip(25)
-                    durationChip(60)
-                }
-                TextField("min", value: $minutes, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-                    .monospacedDigit()
-                    .frame(width: 52)
-                    .onChange(of: minutes) { _, value in
-                        // Anything from a minute to ten hours.
-                        minutes = min(600, max(1, value))
-                    }
-                Text("min")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Spacer()
+            if isBackground {
+                backgroundSection
+            } else {
+                presetAndDuration
             }
 
             Toggle(isOn: $repeatDaily) {
@@ -140,7 +113,9 @@ struct TaskEditorView: View {
                 Spacer()
             }
 
-            allowlistSection
+            if !isBackground {
+                allowlistSection
+            }
 
             Divider()
 
@@ -155,6 +130,152 @@ struct TaskEditorView: View {
         }
         .padding(18)
         .frame(width: 360)
+    }
+
+    // MARK: Focus task
+
+    @ViewBuilder
+    private var presetAndDuration: some View {
+        HStack {
+            Text("Preset")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 60, alignment: .leading)
+            Menu {
+                Button("No preset") {
+                    presetID = nil
+                    overrides = []
+                }
+                Button("Custom allowlist") {
+                    presetID = nil
+                    editingRules = true
+                }
+                Divider()
+                ForEach(model.presets) { preset in
+                    Button(preset.name) {
+                        presetID = preset.id
+                    }
+                }
+            } label: {
+                HStack {
+                    Text(selectedPreset?.name ?? presetMenuFallback)
+                        .foregroundStyle(.primary)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().stroke(Color.secondary.opacity(0.35), lineWidth: 1))
+            }
+            .menuStyle(.borderlessButton)
+            Spacer()
+        }
+
+        HStack {
+            Text("Duration")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 60, alignment: .leading)
+            HStack(spacing: 6) {
+                durationChip(15)
+                durationChip(25)
+                durationChip(60)
+            }
+            TextField("min", value: $minutes, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .monospacedDigit()
+                .frame(width: 52)
+                .onChange(of: minutes) { _, value in
+                    // Anything from a minute to ten hours.
+                    minutes = min(600, max(1, value))
+                }
+            Text("min")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+    }
+
+    // MARK: Background task
+
+    /// The outcome the agent works toward and the agent it goes to.
+    @ViewBuilder
+    private var backgroundSection: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Done when")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 60, alignment: .leading)
+            TextField("Done when…", text: $doneWhen, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...3)
+        }
+
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Agent")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 60, alignment: .leading)
+                agentMenu
+                    .disabled(sentStatus != nil)
+                    .help(sentStatus != nil ? "Already sent; a sent task keeps its agent" : "The herdr agent that works on this task")
+                Spacer()
+            }
+            Text(BackgroundPresentation.readinessHint(
+                doneWhen: doneWhen,
+                assignee: assignee,
+                stored: model.tasks.first { $0.id == task?.id }?.background,
+                startsWithFocus: model.settings.startBackgroundTasksWithFocus
+            ))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.leading, 68)
+        }
+        .task {
+            await model.background.refreshAgents()
+        }
+    }
+
+    private var agentMenu: some View {
+        Menu {
+            Button("Unassigned") { assignee = nil }
+            Divider()
+            if !model.background.isHerdrReachable {
+                Text("herdr isn't running")
+            } else if model.background.agents.isEmpty {
+                Text("No agents in herdr")
+            }
+            ForEach(BackgroundPresentation.agentGroups(model.background.agents, labels: model.background.workspaceLabels), id: \.label) { group in
+                Section(group.label) {
+                    ForEach(group.agents) { agent in
+                        Button {
+                            assignee = model.background.reference(for: agent)
+                        } label: {
+                            if assignee?.paneID == agent.paneID {
+                                Label(BackgroundPresentation.agentTitle(agent), systemImage: "checkmark")
+                            } else {
+                                Text(BackgroundPresentation.agentTitle(agent))
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                Text(assignee.map { BackgroundPresentation.workspaceLabel(for: $0, labels: model.background.workspaceLabels) } ?? "Unassigned")
+                    .foregroundStyle(.primary)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().stroke(Color.secondary.opacity(0.35), lineWidth: 1))
+        }
+        .menuStyle(.borderlessButton)
     }
 
     private func durationChip(_ minutesValue: Int) -> some View {
@@ -262,6 +383,13 @@ struct TaskEditorView: View {
     private func save() {
         let trimmed = title.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
+        // The model keeps the run state of a task already out; the editor
+        // only decides whether it is background and who it goes to.
+        var background: BackgroundInfo?
+        if isBackground {
+            background = task?.background ?? BackgroundInfo()
+            background?.assignee = assignee
+        }
         if let task {
             var updated = task
             updated.title = trimmed
@@ -270,6 +398,10 @@ struct TaskEditorView: View {
             updated.overrides = overrides
             updated.repeatDaily = repeatDaily
             updated.priority = priority
+            if isBackground {
+                updated.doneWhen = doneWhen
+            }
+            updated.background = background
             model.updateTask(updated)
         } else {
             model.addTask(
@@ -278,7 +410,9 @@ struct TaskEditorView: View {
                 presetID: presetID,
                 overrides: overrides,
                 repeatDaily: repeatDaily,
-                priority: priority
+                priority: priority,
+                doneWhen: isBackground ? doneWhen : "",
+                background: background
             )
         }
         dismiss()

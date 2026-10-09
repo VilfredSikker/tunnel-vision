@@ -126,8 +126,15 @@ struct MainPanel: View {
     // MARK: The day's task list
 
     private var daySection: some View {
-        let open = model.sortedOpen(model.openTasks(on: day), for: model.settings.taskSort)
-        let done = model.doneTasks(on: day)
+        var open = model.sortedOpen(model.openTasks(on: day), for: model.settings.taskSort)
+        var done = model.doneTasks(on: day)
+        // Today, background tasks leave the lists for their own section.
+        var background: [TaskItem] = []
+        if isToday {
+            (open, done, background) = BackgroundPresentation.split(open: open, done: done)
+        }
+        let showsBackground = isToday
+            && (!background.isEmpty || !ApprovalReplies.shared.visible(model.background.approvals).isEmpty)
         return VStack(spacing: 6) {
             HStack {
                 dayButton
@@ -215,6 +222,13 @@ struct MainPanel: View {
                 }
                 // Room for about ten rows before the list scrolls.
                 .frame(maxHeight: 420)
+            }
+
+            // Outside the scroll view, so a prompt waiting for an answer is
+            // never scrolled out of sight.
+            if showsBackground {
+                Divider().padding(.horizontal, 14)
+                BackgroundSection(model: model, tasks: background, onEdit: { editorMode = .edit($0) })
             }
 
             Button {

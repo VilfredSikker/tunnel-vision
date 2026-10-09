@@ -18,7 +18,7 @@ public enum ControlTools {
         ),
         MCPTool(
             name: "tunnelvision_add_task",
-            description: "Add a task to the end of the list. `preset` is a preset name or id (for example Coding, Writing, Comms, Reading); `rules` are extra allowlist rules layered on the preset, or the whole allowlist when there is no preset. Anything not allowed is hidden, quit or frozen while the task runs. A task with `repeat_daily` true comes back on tomorrow's list once checked off. Scope each task to one checkable outcome (`done_when`) that fits its duration; steady work that needs several sessions is duplicated with tunnelvision_duplicate_task.",
+            description: "Add a task to the end of the list. `preset` is a preset name or id (for example Coding, Writing, Comms, Reading); `rules` are extra allowlist rules layered on the preset, or the whole allowlist when there is no preset. Anything not allowed is hidden, quit or frozen while the task runs. A task with `repeat_daily` true comes back on tomorrow's list once checked off. Scope each task to one checkable outcome (`done_when`) that fits its duration; steady work that needs several sessions is duplicated with tunnelvision_duplicate_task. With `background` true the task goes to a Claude Code agent in a herdr pane (your own unless `assign_to` names another) when the user next starts a focus session; it never runs on the timer.",
             inputSchema: object([
                 "title": string("What to work on"),
                 "duration_minutes": integer("Work duration in minutes; defaults to the settings default (25)"),
@@ -28,11 +28,13 @@ public enum ControlTools {
                 "priority": priority,
                 "done_when": doneWhen,
                 "goal": string("Goal title or id this task is a step toward"),
+                "background": boolean(backgroundDescription),
+                "assign_to": string(assignToDescription),
             ], required: ["title"])
         ),
         MCPTool(
             name: "tunnelvision_update_task",
-            description: "Change a task's title, duration, preset, priority, done_when, its own rules (the rules replace the task's existing extra rules) or whether it repeats daily. Pass an empty string as `preset` to detach the preset. A running task relocks at once.",
+            description: "Change a task's title, duration, preset, priority, done_when, its own rules (the rules replace the task's existing extra rules), whether it repeats daily, or whether it is a background task and which agent it goes to. Pass an empty string as `preset` to detach the preset. A running task relocks at once.",
             inputSchema: object([
                 "id": string("Task id"),
                 "title": string("New title"),
@@ -43,6 +45,8 @@ public enum ControlTools {
                 "priority": priority,
                 "done_when": doneWhen,
                 "goal": string("Goal title or id, or an empty string to take the task out of its goal"),
+                "background": boolean("True to hand the task to a Claude Code agent (your own herdr pane unless assign_to says otherwise), false to make it an ordinary focus task again"),
+                "assign_to": string("herdr pane id or workspace label of the agent to send it to, or an empty string to unassign; a task already sent keeps its agent"),
             ], required: ["id"])
         ),
         MCPTool(
@@ -152,7 +156,50 @@ public enum ControlTools {
             description: "Running apps with their bundle ids and open window titles, for building allowlists. Rules also accept names of installed apps (looked up in /Applications) in place of bundle ids.",
             inputSchema: object([:])
         ),
+        MCPTool(
+            name: "tunnelvision_list_agents",
+            description: "Claude Code and other agents running in herdr panes: pane id, workspace id and label, status (idle, working, blocked, done, unknown), whether focused, working directory and Claude session id. Background tasks are assigned to one of these with assign_to (a pane id or a workspace label).",
+            inputSchema: object([:])
+        ),
+        MCPTool(
+            name: "tunnelvision_report_background",
+            description: "Report a background task as finished. Call this when you are done with a task Tunnel Vision sent you: the task id from the brief, a one-line summary of what you did, and a link to the result (a PR URL or a file path) if there is one. The task then waits for the user's review.",
+            inputSchema: object([
+                "id": string("Task id from the brief"),
+                "summary": string("One line: what was done"),
+                "link": string("PR URL or file path of the result"),
+            ], required: ["id", "summary"])
+        ),
+        MCPTool(
+            name: "tunnelvision_list_approvals",
+            description: "Prompts that agents working on background tasks are waiting on (permission, question or plan approval), each with id, pane, task, title, question, a few body lines, the numbered options, which option the cursor is on, and whether an option needs typed input (those are answered in the pane).",
+            inputSchema: object([:])
+        ),
+        MCPTool(
+            name: "tunnelvision_answer_approval",
+            description: "Answer a pending approval with one of its numbered options. Refused when the prompt on screen changed, the agent is no longer waiting, or the option needs typed input.",
+            inputSchema: object([
+                "id": string("Approval id from tunnelvision_list_approvals"),
+                "option": integer("Number of the option to choose"),
+            ], required: ["id", "option"])
+        ),
     ] }
+
+    /// Params a tool call adds about where it comes from: the herdr pane and
+    /// workspace the MCP helper runs in, which herdr puts in the agent's
+    /// environment. A background task added without `assign_to` goes to
+    /// that pane. Only task adds and updates carry them.
+    public static func addingCaller(to params: [String: Any], method: String, environment: [String: String]) -> [String: Any] {
+        guard method == "tasks.add" || method == "tasks.update" else { return params }
+        var params = params
+        if let pane = environment["HERDR_PANE_ID"], !pane.isEmpty {
+            params["caller_pane"] = pane
+        }
+        if let workspace = environment["HERDR_WORKSPACE_ID"], !workspace.isEmpty {
+            params["caller_workspace"] = workspace
+        }
+        return params
+    }
 
     /// The control method and params for a tool call; nil for an unknown tool.
     public static func route(tool: String, arguments: [String: Any]) -> (method: String, params: [String: Any])? {
@@ -175,6 +222,10 @@ public enum ControlTools {
         case "tunnelvision_update_preset": return ("presets.update", arguments)
         case "tunnelvision_delete_preset": return ("presets.delete", arguments)
         case "tunnelvision_list_apps": return ("apps.list", [:])
+        case "tunnelvision_list_agents": return ("agents.list", [:])
+        case "tunnelvision_report_background": return ("background.report", arguments)
+        case "tunnelvision_list_approvals": return ("approvals.list", [:])
+        case "tunnelvision_answer_approval": return ("approvals.answer", arguments)
         case "tunnelvision_session":
             guard let action = arguments["action"] as? String else { return nil }
             var params: [String: Any] = [:]
@@ -187,6 +238,10 @@ public enum ControlTools {
     }
 
     // MARK: Schema helpers
+
+    private static let backgroundDescription = "True to hand the task to a Claude Code agent in a herdr pane instead of a focus session. It goes out when the user next starts a focus session, if it has a done_when and an agent; it is never started on the timer"
+
+    private static let assignToDescription = "herdr pane id (e.g. w5K:p1) or workspace label of the agent to send it to; omitted, a background task goes to the pane you are running in"
 
     private static var doneWhen: [String: Any] {
         string("The outcome that makes the task finished, checkable at the end of a session, e.g. \"PR opened\" or \"all 5 open questions answered in the doc\"")

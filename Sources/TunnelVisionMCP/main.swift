@@ -60,8 +60,11 @@ let server = MCPServer(name: "tunnelvision", version: AppIdentity.helperVersion(
         let known = ControlTools.all.contains { $0.name == tool }
         return MCPToolResult(text: known ? "Missing or invalid arguments for \(tool)" : "Unknown tool \(tool)", isError: true)
     }
+    // Running inside an agent's herdr pane: say which, so a background task
+    // added from here goes to this agent.
+    let params = ControlTools.addingCaller(to: route.params, method: route.method, environment: ProcessInfo.processInfo.environment)
     do {
-        return MCPToolResult(text: pretty(try callTunnelVision(method: route.method, params: route.params)))
+        return MCPToolResult(text: pretty(try callTunnelVision(method: route.method, params: params)))
     } catch let error as ControlError {
         return MCPToolResult(text: error.message, isError: true)
     } catch {

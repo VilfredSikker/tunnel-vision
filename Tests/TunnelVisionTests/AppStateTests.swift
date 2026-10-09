@@ -58,12 +58,11 @@ final class AppStateTests: XCTestCase {
 
     // MARK: Seeding & persistence
 
-    func testFirstLaunchSeedsBuiltinsAndDefaultPreset() {
+    func testFirstLaunchSeedsBuiltins() {
         let state = makeState()
         XCTAssertEqual(state.presets.map(\.name), ["Coding", "Writing", "Comms", "Reading"])
         XCTAssertTrue(state.tasks.isEmpty)
         XCTAssertEqual(state.todayCount, 0)
-        XCTAssertEqual(state.defaultPresetID, state.codingPresetID)
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
     }
 
@@ -468,7 +467,7 @@ final class AppStateTests: XCTestCase {
         XCTAssertNil(state.phaseAlert)
         now = now.addingTimeInterval(26 * 60)
         state.tick()
-        XCTAssertEqual(state.phaseAlert, .workEnded(taskTitle: "Deep work", breakSeconds: 60))
+        XCTAssertEqual(state.phaseAlert, .workEnded(taskID: a.id, taskTitle: "Deep work", breakSeconds: 60))
         state.dismissPhaseAlert()
         state.tick()
         XCTAssertNil(state.phaseAlert, "a dismissed popup does not come back on the next tick")
@@ -595,6 +594,23 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(longs, [false, false, true, false])
     }
 
+    func testRepeatFromTheTimesUpPopupRunsAnotherSessionInTheSeries() throws {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        XCTAssertNil(state.repeatEndedTask(), "no popup, nothing to repeat")
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(26 * 60)
+        state.tick()
+        XCTAssertEqual(state.phase, .breakTime)
+
+        let copy = try XCTUnwrap(state.repeatEndedTask())
+        XCTAssertEqual(state.phase, .work, "the break ends")
+        XCTAssertEqual(state.activeTaskID, copy.id)
+        XCTAssertEqual(copy.seriesID, a.id)
+        XCTAssertNil(state.phaseAlert)
+        XCTAssertEqual(state.sessionProgress(for: copy, on: state.todayKey).total, 2)
+    }
+
     func testTimedOutSessionsCountTowardTheLongBreakAndThePopupSaysSo() {
         let state = makeState()
         let (a, _) = seedTwoTasks(in: state)
@@ -606,7 +622,7 @@ final class AppStateTests: XCTestCase {
         state.startTask(id: a.id)
         now = now.addingTimeInterval(26 * 60)
         state.tick()
-        XCTAssertEqual(state.phaseAlert, .workEnded(taskTitle: "Deep work", breakSeconds: 20 * 60, isLong: true))
+        XCTAssertEqual(state.phaseAlert, .workEnded(taskID: a.id, taskTitle: "Deep work", breakSeconds: 20 * 60, isLong: true))
     }
 
     func testEarlyStopBreaksTheRow() {
@@ -1349,14 +1365,6 @@ final class AppStateTests: XCTestCase {
         state.applyPickedAllowlist(taskID: a.id, rules: [], savedPresetID: saved.id)
         XCTAssertEqual(state.activeTask?.presetID, saved.id)
         XCTAssertEqual(state.activeTask?.overrides, [])
-        XCTAssertEqual(state.defaultPresetID, saved.id, "the saved preset becomes the last used one")
-    }
-
-    func testDefaultPresetFollowsLastUsed() {
-        let state = makeState()
-        let comms = state.preset(named: "Comms")!
-        state.addTask(title: "T", durationSeconds: 1500, presetID: comms.id, overrides: [])
-        XCTAssertEqual(state.defaultPresetID, comms.id)
     }
 
     // MARK: Lock notifications

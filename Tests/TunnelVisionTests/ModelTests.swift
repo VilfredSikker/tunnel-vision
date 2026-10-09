@@ -69,8 +69,7 @@ final class ModelTests: XCTestCase {
             presets: [preset],
             settings: settings,
             todayCount: 3,
-            countDay: "2026-09-02",
-            lastUsedPresetID: preset.id
+            countDay: "2026-09-02"
         )
         let archiveData = try JSONEncoder().encode(archive)
         let decoded = try JSONDecoder().decode(Archive.self, from: archiveData)

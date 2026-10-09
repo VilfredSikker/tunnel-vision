@@ -16,7 +16,7 @@ enum SessionPhase: String, Codable, Equatable, Sendable {
 /// done) are not announced: they already know.
 enum PhaseAlert: Equatable, Sendable {
     /// Work time ran out; the break has begun.
-    case workEnded(taskTitle: String, breakSeconds: TimeInterval, isLong: Bool = false)
+    case workEnded(taskID: UUID? = nil, taskTitle: String, breakSeconds: TimeInterval, isLong: Bool = false)
     /// The break ran out; nothing is locked until the next start. The next
     /// task is fixed here so the popup starts the task it names, even if
     /// the list changes while it is up.
@@ -64,7 +64,6 @@ final class AppState {
     private(set) var presets: [Preset] = []
     private(set) var goals: [Goal] = []
     private(set) var settings: Settings = .default
-    private(set) var lastUsedPresetID: UUID?
     private(set) var todayCount: Int = 0
     private(set) var countDay: String = ""
     /// Plants of today's ended sessions, each as far as it got.
@@ -139,6 +138,10 @@ final class AppState {
     /// Every ended work run, oldest first.
     private(set) var history: [SessionRecord] = []
 
+    /// Background tasks on the herdr side: agents, prompts waiting for an
+    /// answer, dispatch. The app connects it to herdr with `attach`.
+    let background: BackgroundAgents
+
     // MARK: Machinery
 
     private let fileURL: URL
@@ -162,8 +165,10 @@ final class AppState {
         self.fileURL = fileURL ?? AppIdentity.supportDirectory.appendingPathComponent("data.json")
         self.historyLog = HistoryLog(fileURL: self.fileURL.deletingLastPathComponent().appendingPathComponent("history.jsonl"))
         self.clock = clock
+        self.background = BackgroundAgents(clock: clock)
         history = historyLog.load()
         loadOrSeed()
+        background.model = self
         if autoTick {
             startLoop()
         }
@@ -273,7 +278,8 @@ final class AppState {
         repeatDaily: Bool = false,
         priority: Int = 2,
         doneWhen: String = "",
-        goalID: Goal.ID? = nil
+        goalID: Goal.ID? = nil,
+        background: BackgroundInfo? = nil
     ) -> TaskItem {
         let task = TaskItem(
             title: title.trimmingCharacters(in: .whitespaces),
@@ -284,7 +290,8 @@ final class AppState {
             priority: min(3, max(1, priority)),
             createdDate: clock(),
             doneWhen: doneWhen.trimmingCharacters(in: .whitespacesAndNewlines),
-            goalID: goal(id: goalID)?.id
+            goalID: goal(id: goalID)?.id,
+            background: background
         )
         tasks.append(task)
         if phase == .breakTime {
@@ -292,7 +299,6 @@ final class AppState {
             // when everything else was already done).
             recomputeNextTask()
         }
-        rememberPreset(presetID)
         persist()
         return task
     }
@@ -304,8 +310,8 @@ final class AppState {
         updated.overrides = task.overrides.filter(\.isComplete)
         updated.goalID = goal(id: task.goalID)?.id
         updated.doneWhen = task.doneWhen.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.background = Self.mergedBackground(edited: task.background, stored: tasks[index].background)
         tasks[index] = updated
-        rememberPreset(task.presetID)
         persist()
         if updated.id == activeTaskID, phase == .work || phase == .paused {
             notifyLockChange()
@@ -519,10 +525,11 @@ final class AppState {
     /// (the chosen sort): the one that starts on a shortcut or appears on the
     /// break banner. A task checked off on the day is spent for that day; a
     /// repeating one is due again the next. `excluding`
-    /// skips a task, such as the one already running.
+    /// skips a task, such as the one already running. Background tasks are
+    /// never next up: an agent works them, not a focus session.
     func nextUpID(on day: String, excluding skipped: TaskItem.ID? = nil) -> TaskItem.ID? {
         sortedOpen(openTasks(on: day), for: settings.taskSort)
-            .first { $0.id != skipped }?.id
+            .first { $0.id != skipped && !$0.isBackground }?.id
     }
 
     /// The task's series as sessions: `total` counts the task and every copy
@@ -564,21 +571,81 @@ final class AppState {
             }
         }
         tasks[index].presetID = presetID
-        rememberPreset(presetID)
         persist()
         if id == activeTaskID, phase == .work || phase == .paused {
             notifyLockChange()
         }
     }
 
+    // MARK: - Background tasks
+
+    /// An edit decides whether the task is background and who it goes to;
+    /// the run state (status, sent time, report) stays the stored one, so
+    /// an editor opened before the agent moved on cannot roll it back. A
+    /// new agent for a task not sent yet starts it over as waiting; a sent
+    /// task keeps its agent.
+    static func mergedBackground(edited: BackgroundInfo?, stored: BackgroundInfo?) -> BackgroundInfo? {
+        guard let edited else { return nil }
+        guard var merged = stored else { return edited }
+        if merged.sentAt == nil, edited.assignee != merged.assignee {
+            merged.assignee = edited.assignee
+            merged.status = .waiting
+        }
+        return merged
+    }
+
+    /// Ready to go out with the next focus session: a background task with
+    /// a title, a done-when and an agent, not sent yet, and on today's list.
+    func isReadyBackground(_ task: TaskItem) -> Bool {
+        guard let info = task.background else { return false }
+        return !task.title.trimmingCharacters(in: .whitespaces).isEmpty
+            && !task.doneWhen.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && info.assignee != nil
+            && info.status == .waiting
+            && info.sentAt == nil
+            && isOpen(task, on: todayKey)
+    }
+
+    /// Every ready background task, in list order.
+    func readyBackgroundTasks() -> [TaskItem] {
+        tasks.filter(isReadyBackground)
+    }
+
+    /// Changes one task's background state and saves. For the dispatcher;
+    /// a task that is not (or no longer) background is left alone.
+    func updateBackground(id: TaskItem.ID, _ change: (inout BackgroundInfo) -> Void) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }), var info = tasks[index].background else { return }
+        change(&info)
+        guard info != tasks[index].background else { return }
+        tasks[index].background = info
+        persist()
+        background.watchIfNeeded()
+    }
+
+    /// The agent's report: the task is finished and waits for the user's
+    /// review. False for a task that is not background.
+    @discardableResult
+    func reportBackground(id: TaskItem.ID, summary: String, link: String?) -> Bool {
+        guard tasks.first(where: { $0.id == id })?.isBackground == true else { return false }
+        let trimmedLink = link?.trimmingCharacters(in: .whitespacesAndNewlines)
+        updateBackground(id: id) {
+            $0.summary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            $0.link = (trimmedLink?.isEmpty ?? true) ? nil : trimmedLink
+            $0.status = .review
+        }
+        return true
+    }
+
+    /// Entering the work phase sends the ready background tasks along.
+    private func startBackgroundWork() {
+        guard settings.startBackgroundTasksWithFocus else { return }
+        background.focusStarted()
+    }
+
     // MARK: - Presets
 
     var builtinPresetID: UUID? {
         presets.first { $0.isBuiltIn }?.id
-    }
-
-    var codingPresetID: UUID? {
-        presets.first { $0.name == "Coding" }?.id
     }
 
     func preset(named name: String) -> Preset? {
@@ -634,7 +701,6 @@ final class AppState {
     func deletePreset(id: UUID) -> Bool {
         guard let index = presets.firstIndex(where: { $0.id == id }), !presets[index].isBuiltIn else { return false }
         let removed = presets.remove(at: index)
-        if lastUsedPresetID == id { lastUsedPresetID = nil }
         let touchedActiveTask = (phase == .work || phase == .paused) && activeTask?.presetID == id
         for taskIndex in tasks.indices where tasks[taskIndex].presetID == id {
             tasks[taskIndex].presetID = nil
@@ -682,9 +748,10 @@ final class AppState {
     /// Start a timed run of the given task. Refused while a session runs
     /// (pause or end it first); starting during a break skips the rest of
     /// it. A task already done today can be repeated: it stays checked off
-    /// and each completed run counts as another session.
+    /// and each completed run counts as another session. A background task
+    /// never runs on the timer: its agent works it.
     func startTask(id: TaskItem.ID) {
-        guard let task = tasks.first(where: { $0.id == id }) else { return }
+        guard let task = tasks.first(where: { $0.id == id }), !task.isBackground else { return }
         guard phase != .work, phase != .paused else { return }
         if phase == .breakTime {
             breakEndsAt = nil
@@ -700,12 +767,12 @@ final class AppState {
         growthBaseElapsed = 0
         phase = .work
         phaseAlert = nil
-        rememberPreset(task.presetID)
         persist()
         Self.log.info("session started: task=\(task.title, privacy: .public) duration=\(Int(self.workTotal))s mode=\(self.activePreset?.mode.displayName ?? "none", privacy: .public)")
         notifyLockChange()
         openPresetURLs(for: task)
         onSessionStarted?(task)
+        startBackgroundWork()
     }
 
     /// The preset's "URLs to open when a task starts" (DESIGN_BRIEF §4).
@@ -746,6 +813,7 @@ final class AppState {
         Self.log.info("session resumed: remaining=\(Int(remaining))s")
         // Resuming re-applies the lock for the running task.
         notifyLockChange()
+        startBackgroundWork()
     }
 
     func togglePause() {
@@ -789,13 +857,21 @@ final class AppState {
     /// history. Refused while a session runs.
     @discardableResult
     func repeatTask(id: TaskItem.ID) -> TaskItem? {
-        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return nil }
+        guard let index = tasks.firstIndex(where: { $0.id == id }), !tasks[index].isBackground else { return nil }
         guard phase != .work, phase != .paused else { return nil }
         let copy = tasks[index].repeatedCopy()
         tasks.insert(copy, at: index + 1)
         persist()
         startTask(id: copy.id)
         return copy
+    }
+
+    /// The time's-up popup's Repeat: the break ends and another session of
+    /// the task that just ran starts at once, as a copy in its series.
+    @discardableResult
+    func repeatEndedTask() -> TaskItem? {
+        guard phase == .breakTime, case .workEnded(let id?, _, _, _) = phaseAlert else { return nil }
+        return repeatTask(id: id)
     }
 
     /// One more session of a task: an open copy in the same series goes
@@ -938,6 +1014,7 @@ final class AppState {
     ///   start is announced with a popup.
     private func completeWork(creditSession: Bool, announce: Bool = false) {
         let title = activeTask?.title ?? "Focus session"
+        let endedTaskID = activeTaskID
         recordGrowth()
         recordHistory(creditSession ? .completed : .skippedToBreak)
         if creditSession {
@@ -960,7 +1037,7 @@ final class AppState {
         let breakSeconds = max(1, isLongBreak ? settings.longBreakSeconds : settings.breakSeconds)
         phase = .breakTime
         breakEndsAt = clock().addingTimeInterval(breakSeconds)
-        phaseAlert = announce ? .workEnded(taskTitle: title, breakSeconds: breakSeconds, isLong: isLongBreak) : nil
+        phaseAlert = announce ? .workEnded(taskID: endedTaskID, taskTitle: title, breakSeconds: breakSeconds, isLong: isLongBreak) : nil
         clearRun()
         persist()
         if settings.soundOn {
@@ -1017,25 +1094,11 @@ final class AppState {
         historyLog.append(record)
     }
 
-    private func rememberPreset(_ id: UUID?) {
-        if let id, presets.contains(where: { $0.id == id }) {
-            lastUsedPresetID = id
-        }
-    }
-
     /// "Next up" is always the first task still due today. Called on
     /// session completion and whenever the list or check-offs change during a
     /// break (the banner must never point at a done or vanished task).
     private func recomputeNextTask() {
         nextTaskID = nextUpID(on: todayKey)
-    }
-
-    /// The preset an Add-task sheet should be pre-filled with.
-    var defaultPresetID: UUID? {
-        if let lastUsedPresetID, presets.contains(where: { $0.id == lastUsedPresetID }) {
-            return lastUsedPresetID
-        }
-        return codingPresetID
     }
 
     // MARK: - Lock notifications (app enforcement)
@@ -1099,7 +1162,6 @@ final class AppState {
         if let savedPresetID, presets.contains(where: { $0.id == savedPresetID }) {
             tasks[index].presetID = savedPresetID
             tasks[index].overrides = []
-            rememberPreset(savedPresetID)
         } else {
             tasks[index].presetID = nil
             tasks[index].overrides = rules.filter(\.isComplete)
@@ -1213,7 +1275,6 @@ final class AppState {
             tasks = archive.tasks
             presets = archive.presets
             settings = archive.settings
-            lastUsedPresetID = archive.lastUsedPresetID
             todayCount = archive.todayCount
             countDay = archive.countDay
             todayGarden = archive.garden
@@ -1239,7 +1300,6 @@ final class AppState {
         }
         presets = BuiltinPresets.all()
         settings = .default
-        lastUsedPresetID = codingPresetID
         todayCount = 0
         todayGarden = []
         countDay = todayKey
@@ -1275,7 +1335,6 @@ final class AppState {
                 settings: settings,
                 todayCount: todayCount,
                 countDay: countDay,
-                lastUsedPresetID: lastUsedPresetID,
                 removedBuiltinNames: [],
                 garden: todayGarden,
                 session: snapshot,

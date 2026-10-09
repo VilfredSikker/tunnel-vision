@@ -42,6 +42,13 @@ final class PhaseAlertController {
             alert: alert,
             onDismiss: { [weak self] in self?.model.dismissPhaseAlert() },
             onSkipBreak: { [weak self] in self?.model.skipBreak() },
+            onRepeat: { [weak self] in
+                guard let self else { return }
+                // The task may have been deleted while the popup was up.
+                if self.model.repeatEndedTask() == nil {
+                    self.model.dismissPhaseAlert()
+                }
+            },
             onStartNext: { [weak self] in
                 guard let self, case .breakEnded(let id?, _) = alert else { return }
                 // The task may have been deleted while the popup was up;
@@ -91,6 +98,7 @@ private struct PhaseAlertView: View {
     let alert: PhaseAlert
     let onDismiss: () -> Void
     let onSkipBreak: () -> Void
+    let onRepeat: () -> Void
     let onStartNext: () -> Void
 
     var body: some View {
@@ -126,6 +134,9 @@ private struct PhaseAlertView: View {
         case .workEnded:
             Button("Skip break", action: onSkipBreak)
                 .controlSize(.large)
+            Button("Repeat", action: onRepeat)
+                .controlSize(.large)
+                .help("Skip the break and run another session of this task")
             Button("OK", action: onDismiss)
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
@@ -151,14 +162,14 @@ private struct PhaseAlertView: View {
 
     private var headline: String {
         switch alert {
-        case .workEnded(let title, _, _): "Time’s up on “\(title)”"
+        case .workEnded(_, let title, _, _): "Time’s up on “\(title)”"
         case .breakEnded: "Break’s over"
         }
     }
 
     private var detail: String {
         switch alert {
-        case .workEnded(_, let seconds, let isLong):
+        case .workEnded(_, _, let seconds, let isLong):
             "Your \(TimeFormat.minutes(seconds)) \(isLong ? "long break" : "break") has started. Everything is unlocked."
         case .breakEnded(_, let next):
             next.map { "Next up: \($0)" } ?? "Nothing left on today’s list."

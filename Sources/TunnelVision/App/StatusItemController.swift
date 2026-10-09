@@ -97,17 +97,26 @@ final class StatusItemController: NSObject {
         image?.isTemplate = true
         button.image = image
 
+        let title = NSMutableAttributedString()
         if let remaining = model.remainingSeconds {
             let text = TimeFormat.clock(remaining)
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
                 .foregroundColor: NSColor.labelColor,
             ]
-            button.attributedTitle = NSAttributedString(string: " \(text)", attributes: attributes)
-        } else {
-            button.attributedTitle = NSAttributedString(string: "")
+            title.append(NSAttributedString(string: " \(text)", attributes: attributes))
         }
-        button.toolTip = tooltip
+        // A background agent waits on a prompt: a small dot after the time.
+        let waiting = model.background.approvals.count
+        if waiting > 0 {
+            title.append(NSAttributedString(string: " ●", attributes: [
+                .font: NSFont.systemFont(ofSize: 7),
+                .foregroundColor: NSColor.systemOrange,
+                .baselineOffset: 3,
+            ]))
+        }
+        button.attributedTitle = title
+        button.toolTip = waiting > 0 ? "\(BackgroundPresentation.waitingText(waiting))\n\(tooltip)" : tooltip
     }
 
     private var tooltip: String {
