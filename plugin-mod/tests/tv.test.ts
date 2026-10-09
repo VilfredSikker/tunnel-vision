@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Task, TVState } from '../types'
 import {
+  HAND_OFF_AFTER_MS,
   addParams,
   checkInChoices,
   contextGoal,
@@ -11,6 +12,7 @@ import {
   nextCheckIn,
   nextUpOrder,
   remaining,
+  skillPrompt,
   sortedTasks,
   statusText,
   transitionText,
@@ -257,6 +259,54 @@ test('/tv start <fragment> starts the matching task over the socket', async ($, 
 
   expect(sent.find(r => r.method === 'session.start')?.params).toEqual({ id: 'A1' })
   expect(text).toContain('Idle')
+})
+
+describe('skillPrompt', () => {
+  test('bg names the background-task skill and keeps the note', () => {
+    expect(skillPrompt('bg', '  only the parser part ')).toBe('Use the tunnelvision:background-task skill. only the parser part')
+  })
+  test('aliases and case reach the same skill', () => {
+    expect(skillPrompt('Background', '')).toBe('Use the tunnelvision:background-task skill.')
+    expect(skillPrompt('capture', '')).toBe(skillPrompt('task', ''))
+    expect(skillPrompt('eod', '')).toBe('Use the tunnelvision:end-of-day skill.')
+  })
+  test('an unknown verb is not a skill', () => {
+    expect(skillPrompt('fly', 'away')).toBeUndefined()
+  })
+})
+
+// A `command.run` hook cannot submit the prompt itself (the engine refuses a
+// submit while the hook holds the turn), so the answer prints first and a
+// timer submits once the hook has returned.
+test('/tv bg answers first, then hands the skill prompt to Claude as the person’s own', async ($, on) => {
+  const clock = mock.clock(on)
+  const submitted: { text: string; origin: unknown }[] = []
+  on('prompt.submit', ($, e) => {
+    submitted.push({ text: e.text, origin: e.origin })
+    return { text: e.text }
+  })
+
+  const { text } = await $.command.run({ ...TYPED, args: 'bg only the parser part' })
+  expect(text).toBe('Handing it to Claude: Use the tunnelvision:background-task skill. only the parser part')
+  expect(submitted).toEqual([])
+
+  await clock.advance(HAND_OFF_AFTER_MS)
+  expect(submitted.length).toBe(1)
+  expect(submitted[0]?.text).toBe('Use the tunnelvision:background-task skill. only the parser part')
+  expect(submitted[0]?.origin).toEqual({ kind: 'plugin', name: 'tunnelvision-mod', asUser: true })
+})
+
+test('/tv with an unknown verb shows the usage and submits nothing', async ($, on) => {
+  let submitted = 0
+  on('prompt.submit', ($, e) => {
+    submitted += 1
+    return { text: e.text }
+  })
+
+  const { text } = await $.command.run({ ...TYPED, args: 'fly' })
+
+  expect(submitted).toBe(0)
+  expect(text).toContain('/tv bg [note]')
 })
 
 test('/tv start with an ambiguous fragment sends no start', async ($, on) => {

@@ -3,6 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { CheckIn, Priority, Snapshot, Task, TVState } from '../types'
 import {
+  HAND_OFF_AFTER_MS,
   NOT_RUNNING,
   SOCKET,
   addParams,
@@ -22,6 +23,7 @@ import {
   remaining,
   requestLine,
   sessionsDone,
+  skillPrompt,
   statusText,
   transitionText,
 } from './tv'
@@ -47,6 +49,9 @@ const USAGE = [
   '/tv skip            skip the break',
   '/tv later <title>   add a low-priority task, in the current task’s goal',
   '/tv next <title>    add a task in the current task’s goal and make it next up',
+  '/tv bg [note]       hand this conversation’s work to this agent as a background task',
+  '/tv task [note]     turn this conversation’s work into a focus task for you',
+  '/tv plan | review | eod | breakdown | suggest   run that Tunnel Vision skill',
 ].join('\n')
 
 type Outcome = { ok: boolean; text: string }
@@ -209,13 +214,27 @@ async function status($: EngineInterface): Promise<string> {
   return describe(snap.state, left)
 }
 
+/**
+ * Hands a skill prompt to Claude as the person's own, once the command's
+ * answer has printed. The engine refuses a submit made inside a `command.run`
+ * hook (it would wait on the turn the hook holds), so a timer submits after
+ * the hook has returned; a refusal is said in a toast, never swallowed.
+ */
+function handOff($: EngineInterface, prompt: string): void {
+  $.clock.after(HAND_OFF_AFTER_MS, () => {
+    void $.prompt.submit({ text: prompt, asUser: true }).catch(error => {
+      $.ui.toast(`Could not hand it to Claude: ${message(error)}`)
+    })
+  })
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'tv',
       description: 'Tunnel Vision: status, start/pause/done/stop a focus session, add tasks, open the task pane',
       argumentHint:
-        '[close | status | start <task> | pause | resume | done | stop | extend <min> | skip | later <title> | next <title> | help]',
+        '[close | status | start <task> | pause | resume | done | stop | extend <min> | skip | later <title> | next <title> | bg [note] | task [note] | plan | review | eod | breakdown | suggest | help]',
       immediate: true,
     })
     await refresh($)
@@ -263,8 +282,14 @@ export const register: Register = on => {
         if (added.ok) await update($, checkIn, () => null)
         return { text: added.text }
       }
-      default:
-        return { text: USAGE }
+      default: {
+        // Skill verbs need Claude to read the conversation: the prompt runs
+        // as the person's own turn once the session is idle.
+        const prompt = skillPrompt(verb, arg)
+        if (!prompt) return { text: USAGE }
+        handOff($, prompt)
+        return { text: `Handing it to Claude: ${prompt}` }
+      }
     }
   })
 

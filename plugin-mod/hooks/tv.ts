@@ -275,3 +275,31 @@ export function describe(state: TVState | null, left: number | undefined): strin
       return `Idle. ${count}${next}`
   }
 }
+
+/** `/tv` verbs that hand the conversation to a skill of the `tunnelvision` plugin. */
+export const SKILL_VERBS: Record<string, string> = {
+  bg: 'background-task',
+  background: 'background-task',
+  task: 'capture-task',
+  capture: 'capture-task',
+  plan: 'plan-day',
+  review: 'review-tasks',
+  eod: 'end-of-day',
+  breakdown: 'break-down',
+  suggest: 'suggest-tasks',
+}
+
+/** The prompt a skill verb submits: the skill to run, then the person's note. */
+export function skillPrompt(verb: string, note: string): string | undefined {
+  const skill = SKILL_VERBS[verb.toLowerCase()]
+  if (!skill) return undefined
+  const extra = note.trim()
+  return `Use the tunnelvision:${skill} skill.${extra === '' ? '' : ` ${extra}`}`
+}
+
+/**
+ * How long after a skill verb's answer prints its prompt is submitted. The
+ * engine refuses a submit made inside a `command.run` hook (it would wait on
+ * the turn the hook holds), so a timer submits once the hook has returned.
+ */
+export const HAND_OFF_AFTER_MS = 50

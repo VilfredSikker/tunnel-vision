@@ -4,6 +4,7 @@ Puts [Tunnel Vision](https://github.com/VilfredSikker/tunnel-vision)'s focus tim
 
 - a status line with the running task and the time left
 - `/tv` commands to start, pause, finish and extend sessions, and to add tasks (`/tv later`, `/tv next`)
+- shortcuts to the `tunnelvision` skills: `/tv bg` hands the conversation's work to this agent as a background task, `/tv task` turns it into a focus task, and `/tv plan`, `review`, `eod`, `breakdown` and `suggest` run those skills
 - a task pane (`/tv`) with today's open tasks grouped by goal, and a check-in when a session runs out: Done, One more session, or a next step in the same goal
 - the running task, its goal and its "done when" outcome in Claude's system prompt, so Claude keeps the work on it and says when the outcome looks met
 
