@@ -22,6 +22,7 @@ struct SettingsView: View {
     @State private var pickWindowHotKey: HotKey?
     @State private var showCountdownWindow: Bool
     @State private var countdownStyle: CountdownStyle
+    @State private var startBackgroundTasksWithFocus: Bool
     @State private var unmanagedBrowsers: Set<String>
     @State private var launchAtLogin: Bool
     @State private var launchAtLoginError = ""
@@ -45,6 +46,7 @@ struct SettingsView: View {
         _pickWindowHotKey = State(initialValue: settings.pickWindowHotKey)
         _showCountdownWindow = State(initialValue: settings.showCountdownWindow)
         _countdownStyle = State(initialValue: settings.countdownStyle)
+        _startBackgroundTasksWithFocus = State(initialValue: settings.startBackgroundTasksWithFocus)
         _unmanagedBrowsers = State(initialValue: Set(settings.unmanagedBrowsers))
         _launchAtLogin = State(initialValue: LaunchAtLogin.state == .enabled)
         _installedBrowsers = State(initialValue: Browsers.installed())
@@ -143,6 +145,13 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Background tasks") {
+                Toggle("Start background tasks when a focus session starts", isOn: $startBackgroundTasksWithFocus)
+                Text("Each ready background task goes to its Claude Code agent in herdr once, when a focus session starts. Prompts the agent shows wait in the panel and the floating countdown.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Browsers") {
                 if installedBrowsers.isEmpty {
                     Text("No supported browser is installed. Site rules work in Safari and Chromium browsers such as Chrome, Brave, Edge, Vivaldi, Arc and Helium.")
@@ -197,6 +206,7 @@ struct SettingsView: View {
         }
         .onChange(of: showCountdownWindow) { _, _ in apply() }
         .onChange(of: countdownStyle) { _, _ in apply() }
+        .onChange(of: startBackgroundTasksWithFocus) { _, _ in apply() }
         .onChange(of: unmanagedBrowsers) { _, _ in apply() }
         .onChange(of: launchAtLogin) { _, value in applyLaunchAtLogin(value) }
     }
@@ -286,6 +296,7 @@ struct SettingsView: View {
         settings.pickWindowHotKey = pickWindowHotKey
         settings.showCountdownWindow = showCountdownWindow
         settings.countdownStyle = countdownStyle
+        settings.startBackgroundTasksWithFocus = startBackgroundTasksWithFocus
         settings.unmanagedBrowsers = unmanagedBrowsers.sorted()
         model.updateSettings(settings)
     }

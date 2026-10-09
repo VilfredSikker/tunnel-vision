@@ -20,12 +20,43 @@ struct HerdrSnapshot: Equatable, Sendable {
     let workspaces: [HerdrWorkspace]
 }
 
-/// Pushed events the guard cares about; everything else is `.other`.
+/// What herdr reads an agent pane as doing.
+enum HerdrAgentStatus: String, Sendable {
+    case idle
+    case working
+    /// Showing a prompt: a permission, a question or a plan approval.
+    case blocked
+    case done
+    case unknown
+
+    /// Ready for a new prompt.
+    var isIdle: Bool { self == .idle || self == .done }
+}
+
+/// One agent pane, as `agent.list` reports it.
+struct HerdrAgent: Identifiable, Equatable, Sendable {
+    let paneID: String
+    let workspaceID: String
+    let cwd: String?
+    /// The agent kind, such as `claude`.
+    let agent: String?
+    let status: HerdrAgentStatus
+    let focused: Bool
+    /// The Claude session id, when herdr knows it.
+    let sessionID: String?
+
+    var id: String { paneID }
+}
+
+/// Pushed events the guard and the background agents care about;
+/// everything else is `.other`.
 enum HerdrEvent: Equatable, Sendable {
     case workspaceFocused(id: String)
     case workspaceRenamed(id: String, label: String?)
     case workspaceClosed(id: String)
     case workspaceCreated(HerdrWorkspace)
+    /// Nil status: herdr no longer reads an agent in the pane.
+    case agentStatusChanged(paneID: String, status: HerdrAgentStatus?)
     case other
 }
 
@@ -42,6 +73,12 @@ enum HerdrError: Error, Equatable {
 /// line, one response line per request, then pushed event lines on a
 /// subscription connection.
 enum HerdrProtocol {
+    /// What the workspace lock follows.
+    static let workspaceEventKinds = ["workspace.focused", "workspace.renamed", "workspace.closed", "workspace.created"]
+    /// What background tasks follow. Its own subscription, so a kind herdr
+    /// refuses cannot take the workspace lock down with it.
+    static let agentEventKinds = ["pane.agent_status_changed"]
+
     static func request(id: String, method: String, params: [String: Any]) -> Data {
         let body: [String: Any] = ["id": id, "method": method, "params": params]
         var data = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
@@ -94,9 +131,51 @@ enum HerdrProtocol {
         case "workspace_created":
             guard let raw = data["workspace"] as? [String: Any], let workspace = workspace(from: raw) else { return nil }
             return .workspaceCreated(workspace)
+        case "pane_agent_status_changed":
+            guard let pane = data["pane_id"] as? String else { return nil }
+            let status = (data["agent_status"] as? String).map { HerdrAgentStatus(rawValue: $0) ?? .unknown }
+            return .agentStatusChanged(paneID: pane, status: status)
         default:
             return .other
         }
+    }
+
+    /// `agent.list`: `{"result":{"type":"agent_list","agents":[…]}}`.
+    static func parseAgents(_ line: Data) throws -> [HerdrAgent] {
+        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let result = object["result"] as? [String: Any],
+              let raw = result["agents"] as? [[String: Any]] else { throw HerdrError.malformed }
+        return raw.compactMap(agent(from:))
+    }
+
+    static func agent(from raw: [String: Any]) -> HerdrAgent? {
+        guard let pane = raw["pane_id"] as? String, let workspace = raw["workspace_id"] as? String else { return nil }
+        // A session reference of kind "path" is a transcript path, not an id.
+        let session = raw["agent_session"] as? [String: Any]
+        let sessionID = (session?["kind"] as? String ?? "id") == "id" ? session?["value"] as? String : nil
+        return HerdrAgent(
+            paneID: pane,
+            workspaceID: workspace,
+            cwd: raw["cwd"] as? String,
+            agent: raw["agent"] as? String,
+            status: (raw["agent_status"] as? String).flatMap(HerdrAgentStatus.init(rawValue:)) ?? .unknown,
+            focused: (raw["focused"] as? Bool) ?? false,
+            sessionID: sessionID
+        )
+    }
+
+    /// `agent.read`: `{"result":{"type":"pane_read","read":{"text":…}}}`, per
+    /// herdr's bundled API schema (protocol 22). A bare `text` is accepted too.
+    static func parseRead(_ line: Data) throws -> String {
+        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let result = object["result"] as? [String: Any] else { throw HerdrError.malformed }
+        if let read = result["read"] as? [String: Any], let text = read["text"] as? String {
+            return text
+        }
+        if let text = result["text"] as? String {
+            return text
+        }
+        throw HerdrError.malformed
     }
 
     static func workspace(from raw: [String: Any]) -> HerdrWorkspace? {
@@ -114,7 +193,8 @@ enum HerdrProtocol {
 
 // MARK: - Client
 
-/// The slice of herdr's socket API the workspace lock needs.
+/// The slice of herdr's socket API the workspace lock and the background
+/// agents need.
 @MainActor
 protocol HerdrControlling: AnyObject {
     /// The server socket exists (herdr is installed and its server has run).
@@ -122,8 +202,20 @@ protocol HerdrControlling: AnyObject {
     func snapshot() async throws -> HerdrSnapshot
     func focusWorkspace(id: String) async throws
     func notify(title: String, body: String?) async
-    /// Long-lived subscription; ends when the connection drops.
-    func events() -> AsyncStream<HerdrEvent>
+    /// Every agent pane herdr knows.
+    func agents() async throws -> [HerdrAgent]
+    /// Submits `text` to the agent in the pane as a prompt.
+    func prompt(target paneID: String, text: String) async throws
+    /// The pane's visible screen as plain text.
+    func read(target paneID: String) async throws -> String
+    /// Key presses by herdr name, such as `Down` or `Enter`.
+    func sendKeys(target paneID: String, keys: [String]) async throws
+    /// Brings the agent's pane forward inside herdr, switching to its
+    /// workspace.
+    func focusAgent(target paneID: String) async throws
+    /// Long-lived subscription to the given event kinds; ends when the
+    /// connection drops.
+    func events(kinds: [String]) -> AsyncStream<HerdrEvent>
 }
 
 @MainActor
@@ -161,18 +253,35 @@ final class HerdrSocketClient: HerdrControlling {
         _ = try? await call(method: "notification.show", params: params)
     }
 
-    func events() -> AsyncStream<HerdrEvent> {
+    func agents() async throws -> [HerdrAgent] {
+        let line = try await call(method: "agent.list", params: [:])
+        return try HerdrProtocol.parseAgents(line)
+    }
+
+    func prompt(target paneID: String, text: String) async throws {
+        _ = try await call(method: "agent.prompt", params: ["target": paneID, "text": text])
+    }
+
+    func read(target paneID: String) async throws -> String {
+        let line = try await call(method: "agent.read", params: ["target": paneID, "source": "visible", "strip_ansi": true])
+        return try HerdrProtocol.parseRead(line)
+    }
+
+    func sendKeys(target paneID: String, keys: [String]) async throws {
+        _ = try await call(method: "agent.send_keys", params: ["target": paneID, "keys": keys])
+    }
+
+    func focusAgent(target paneID: String) async throws {
+        _ = try await call(method: "agent.focus", params: ["target": paneID])
+    }
+
+    func events(kinds: [String]) -> AsyncStream<HerdrEvent> {
         let connection = HerdrLineConnection(path: socketPath)
         return AsyncStream { continuation in
             let task = Task { @MainActor in
                 do {
                     try await connection.open()
-                    let subscriptions: [[String: Any]] = [
-                        ["type": "workspace.focused"],
-                        ["type": "workspace.renamed"],
-                        ["type": "workspace.closed"],
-                        ["type": "workspace.created"],
-                    ]
+                    let subscriptions: [[String: Any]] = kinds.map { ["type": $0] }
                     try await connection.send(HerdrProtocol.request(
                         id: "tunnelvision-events",
                         method: "events.subscribe",

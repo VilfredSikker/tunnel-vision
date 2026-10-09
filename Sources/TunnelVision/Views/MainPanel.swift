@@ -66,11 +66,11 @@ struct MainPanel: View {
                 }, onEditTask: { pendingEditActiveTask = true })
             } else if model.phase == .breakTime {
                 BreakHeader(model: model)
+            } else {
+                BreakButtons(model: model)
             }
 
-            if model.phase == .work || model.phase == .paused || model.phase == .breakTime {
-                Divider()
-            }
+            Divider()
 
             daySection
 
@@ -125,22 +125,16 @@ struct MainPanel: View {
 
     // MARK: The day's task list
 
-    /// Applies the user's chosen sort to the open tasks. Done tasks always
-    /// stay most-recent-first regardless of sort preference.
-    private func sortedOpen(_ tasks: [TaskItem]) -> [TaskItem] {
-        switch model.settings.taskSort {
-        case .manual:
-            return tasks
-        case .created:
-            return tasks.sorted { $0.createdDate < $1.createdDate }
-        case .priority:
-            return tasks.sorted { $0.priority < $1.priority }
-        }
-    }
-
     private var daySection: some View {
-        let open = sortedOpen(model.openTasks(on: day))
-        let done = model.doneTasks(on: day)
+        var open = model.sortedOpen(model.openTasks(on: day), for: model.settings.taskSort)
+        var done = model.doneTasks(on: day)
+        // Today, background tasks leave the lists for their own section.
+        var background: [TaskItem] = []
+        if isToday {
+            (open, done, background) = BackgroundPresentation.split(open: open, done: done)
+        }
+        let showsBackground = isToday
+            && (!background.isEmpty || !ApprovalReplies.shared.visible(model.background.approvals).isEmpty)
         return VStack(spacing: 6) {
             HStack {
                 dayButton
@@ -175,6 +169,10 @@ struct MainPanel: View {
                     .labelsHidden()
                 }
                 .padding(.horizontal, 14)
+            }
+
+            if isToday && !model.openGoals.isEmpty {
+                GoalsStrip(model: model)
             }
 
             if model.tasks.isEmpty {
@@ -222,7 +220,15 @@ struct MainPanel: View {
                         }
                     }
                 }
-                .frame(maxHeight: 250)
+                // Room for about ten rows before the list scrolls.
+                .frame(maxHeight: 420)
+            }
+
+            // Outside the scroll view, so a prompt waiting for an answer is
+            // never scrolled out of sight.
+            if showsBackground {
+                Divider().padding(.horizontal, 14)
+                BackgroundSection(model: model, tasks: background, onEdit: { editorMode = .edit($0) })
             }
 
             Button {
@@ -270,11 +276,12 @@ struct MainPanel: View {
                 model: model,
                 task: task,
                 day: day,
-                allowsReorder: isToday && model.settings.taskSort == .manual,
+                allowsReorder: isToday && model.settings.taskSort != .created,
                 onEdit: { editorMode = .edit(task) },
                 dragID: $dragID,
                 dropTargetID: $dropTargetID,
-                onReorder: reorder
+                onReorder: reorder,
+                canReorder: canReorder
             )
             if task.id != tasks.last?.id {
                 Divider().padding(.leading, 42)
@@ -283,9 +290,18 @@ struct MainPanel: View {
     }
 
     /// Moves `id` to sit before `targetID`; a nil target means the end of the
-    /// open list. The model itself refuses moves involving the running task.
+    /// open list. Sorted by priority, a task only moves within its own
+    /// priority. The model itself refuses moves involving the running task.
     private func reorder(_ id: TaskItem.ID, before targetID: TaskItem.ID?) {
-        model.moveTask(id: id, before: targetID)
+        if model.settings.taskSort == .priority {
+            model.moveTaskWithinPriority(id: id, before: targetID)
+        } else {
+            model.moveTask(id: id, before: targetID)
+        }
+    }
+
+    private func canReorder(_ id: TaskItem.ID, before targetID: TaskItem.ID?) -> Bool {
+        model.settings.taskSort != .priority || model.canMoveTaskWithinPriority(id: id, before: targetID)
     }
 
     /// A slim strip under the open list that drops a task to the end.
@@ -295,7 +311,7 @@ struct MainPanel: View {
             .frame(height: 6)
             .contentShape(Rectangle())
             .overlay(alignment: .bottom) {
-                if dropTargetID == nil, dragID != nil {
+                if dropTargetID == nil, let dragID, canReorder(dragID, before: nil) {
                     InsertionMarker()
                         .padding(.horizontal, 14)
                         .transition(.opacity)
@@ -304,7 +320,8 @@ struct MainPanel: View {
             .onDrop(of: [.text], delegate: EndDropDelegate(
                 dragID: $dragID,
                 dropTargetID: $dropTargetID,
-                onReorder: reorder
+                onReorder: reorder,
+                canReorder: canReorder
             ))
     }
 
@@ -406,14 +423,15 @@ private struct EndDropDelegate: DropDelegate {
     @Binding var dragID: TaskItem.ID?
     @Binding var dropTargetID: TaskItem.ID?
     let onReorder: (TaskItem.ID, TaskItem.ID?) -> Void
+    let canReorder: (TaskItem.ID, TaskItem.ID?) -> Bool
 
     func dropEntered(info: DropInfo) {
-        guard dragID != nil else { return }
+        guard let id = dragID, canReorder(id, nil) else { return }
         dropTargetID = nil
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard dragID != nil else { return nil }
+        guard let id = dragID, canReorder(id, nil) else { return nil }
         dropTargetID = nil
         return DropProposal(operation: .move)
     }
@@ -423,7 +441,7 @@ private struct EndDropDelegate: DropDelegate {
             dragID = nil
             dropTargetID = nil
         }
-        guard let id = dragID else { return false }
+        guard let id = dragID, canReorder(id, nil) else { return false }
         onReorder(id, nil)
         return true
     }

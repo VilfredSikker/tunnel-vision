@@ -1,0 +1,19 @@
+{
+  "name": "tunnel-vision",
+  "description": "Claude Code skills and a live mod for Tunnel Vision, the macOS menu bar focus timer.",
+  "owner": {
+    "name": "Vilfred Sikker"
+  },
+  "plugins": [
+    {
+      "name": "tunnelvision",
+      "source": "./plugin",
+      "description": "Plan the day, break work into goals, suggest tasks, review what got done and close out the day in Tunnel Vision, the menu bar focus timer."
+    },
+    {
+      "name": "tunnelvision-mod",
+      "source": "./plugin-mod",
+      "description": "Tunnel Vision in Claude Code itself: a status line, /tv commands, a task pane and the running task in Claude's system prompt. Needs a Claude Code build with function hooks."
+    }
+  ]
+}

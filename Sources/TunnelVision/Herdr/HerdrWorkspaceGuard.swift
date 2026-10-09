@@ -123,7 +123,7 @@ final class HerdrWorkspaceGuard: LockListener {
             return false
         }
         report(nil)
-        for await event in client.events() {
+        for await event in client.events(kinds: HerdrProtocol.workspaceEventKinds) {
             guard isActive else { break }
             await handle(event)
         }
@@ -193,7 +193,7 @@ final class HerdrWorkspaceGuard: LockListener {
             if !orderedIDs.contains(workspace.id) {
                 orderedIDs.append(workspace.id)
             }
-        case .other:
+        case .agentStatusChanged, .other:
             break
         }
     }

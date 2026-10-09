@@ -47,7 +47,7 @@ and dark appearance.
   (a checked-off repeating task stays offered, and shows again under open after
   the day turns).
 - Add task: title, duration picker with defaults of 25 and 50 minutes, preset dropdown
-  pre-filled with the last used preset, an "edit allowlist" link that opens the
+  with no preset until one is picked, an "edit allowlist" link that opens the
   picker overlay, and a repeat daily toggle.
 - Footer: presets, settings, quit.
 

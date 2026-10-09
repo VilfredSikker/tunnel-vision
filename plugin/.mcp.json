@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "tunnelvision": {
+      "command": "/Applications/TunnelVision.app/Contents/Helpers/tunnelvision-mcp"
+    }
+  }
+}

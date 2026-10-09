@@ -97,17 +97,26 @@ final class StatusItemController: NSObject {
         image?.isTemplate = true
         button.image = image
 
+        let title = NSMutableAttributedString()
         if let remaining = model.remainingSeconds {
             let text = TimeFormat.clock(remaining)
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
                 .foregroundColor: NSColor.labelColor,
             ]
-            button.attributedTitle = NSAttributedString(string: " \(text)", attributes: attributes)
-        } else {
-            button.attributedTitle = NSAttributedString(string: "")
+            title.append(NSAttributedString(string: " \(text)", attributes: attributes))
         }
-        button.toolTip = tooltip
+        // A background agent waits on a prompt: a small dot after the time.
+        let waiting = model.background.approvals.count
+        if waiting > 0 {
+            title.append(NSAttributedString(string: " ●", attributes: [
+                .font: NSFont.systemFont(ofSize: 7),
+                .foregroundColor: NSColor.systemOrange,
+                .baselineOffset: 3,
+            ]))
+        }
+        button.attributedTitle = title
+        button.toolTip = waiting > 0 ? "\(BackgroundPresentation.waitingText(waiting))\n\(tooltip)" : tooltip
     }
 
     private var tooltip: String {
@@ -164,7 +173,7 @@ final class StatusItemController: NSObject {
         guard let view = popover.contentViewController?.view else { return }
         let fitting = view.fittingSize
         let width = min(max(fitting.width, 300), 380)
-        let height = min(max(fitting.height, 220), 640)
+        let height = min(max(fitting.height, 220), 800)
         popover.contentSize = NSSize(width: width, height: height)
     }
 
@@ -179,6 +188,8 @@ final class StatusItemController: NSObject {
             let item = NSMenuItem(title: "Nothing running", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
+            menu.addItem(makeItem("Short break", #selector(quickShortBreak)))
+            menu.addItem(makeItem("Long break", #selector(quickLongBreak)))
         case .work:
             menu.addItem(makeItem("Pause", #selector(quickPauseResume)))
         case .paused:
@@ -259,6 +270,16 @@ final class StatusItemController: NSObject {
 
     @objc private func quickSkipBreak() {
         model.skipBreak()
+        refreshLabel()
+    }
+
+    @objc private func quickShortBreak() {
+        model.startBreak(long: false)
+        refreshLabel()
+    }
+
+    @objc private func quickLongBreak() {
+        model.startBreak(long: true)
         refreshLabel()
     }
 

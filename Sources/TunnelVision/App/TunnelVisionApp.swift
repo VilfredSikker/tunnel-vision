@@ -120,11 +120,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Inside the terminal, herdr workspaces are locked over herdr's
         // socket API: a switch to a non-allowed workspace bounces back.
+        let herdrClient = HerdrSocketClient()
         let herdrGuard = HerdrWorkspaceGuard(
-            client: HerdrSocketClient(),
+            client: herdrClient,
             taskTitle: { [weak model] in model?.activeTask?.title ?? "this task" }
         )
         self.herdrGuard = herdrGuard
+
+        // Background tasks go to Claude Code agents over the same socket; a
+        // task sent before a relaunch is followed again from here.
+        model.background.attach(client: herdrClient)
 
         // A layer that cannot enforce what the session asks says so in the
         // session header.
@@ -202,7 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let api = ControlAPI(model: model)
         controlAPI = api
         let server = ControlServer { method, params in
-            try api.handle(method: method, params: params)
+            try await api.respond(method: method, params: params)
         }
         do {
             try server.start()

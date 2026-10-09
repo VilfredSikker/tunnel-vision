@@ -58,12 +58,11 @@ final class AppStateTests: XCTestCase {
 
     // MARK: Seeding & persistence
 
-    func testFirstLaunchSeedsBuiltinsAndDefaultPreset() {
+    func testFirstLaunchSeedsBuiltins() {
         let state = makeState()
         XCTAssertEqual(state.presets.map(\.name), ["Coding", "Writing", "Comms", "Reading"])
         XCTAssertTrue(state.tasks.isEmpty)
         XCTAssertEqual(state.todayCount, 0)
-        XCTAssertEqual(state.defaultPresetID, state.codingPresetID)
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
     }
 
@@ -468,7 +467,7 @@ final class AppStateTests: XCTestCase {
         XCTAssertNil(state.phaseAlert)
         now = now.addingTimeInterval(26 * 60)
         state.tick()
-        XCTAssertEqual(state.phaseAlert, .workEnded(taskTitle: "Deep work", breakSeconds: 60))
+        XCTAssertEqual(state.phaseAlert, .workEnded(taskID: a.id, taskTitle: "Deep work", breakSeconds: 60))
         state.dismissPhaseAlert()
         state.tick()
         XCTAssertNil(state.phaseAlert, "a dismissed popup does not come back on the next tick")
@@ -595,6 +594,23 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(longs, [false, false, true, false])
     }
 
+    func testRepeatFromTheTimesUpPopupRunsAnotherSessionInTheSeries() throws {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        XCTAssertNil(state.repeatEndedTask(), "no popup, nothing to repeat")
+        state.startTask(id: a.id)
+        now = now.addingTimeInterval(26 * 60)
+        state.tick()
+        XCTAssertEqual(state.phase, .breakTime)
+
+        let copy = try XCTUnwrap(state.repeatEndedTask())
+        XCTAssertEqual(state.phase, .work, "the break ends")
+        XCTAssertEqual(state.activeTaskID, copy.id)
+        XCTAssertEqual(copy.seriesID, a.id)
+        XCTAssertNil(state.phaseAlert)
+        XCTAssertEqual(state.sessionProgress(for: copy, on: state.todayKey).total, 2)
+    }
+
     func testTimedOutSessionsCountTowardTheLongBreakAndThePopupSaysSo() {
         let state = makeState()
         let (a, _) = seedTwoTasks(in: state)
@@ -606,7 +622,7 @@ final class AppStateTests: XCTestCase {
         state.startTask(id: a.id)
         now = now.addingTimeInterval(26 * 60)
         state.tick()
-        XCTAssertEqual(state.phaseAlert, .workEnded(taskTitle: "Deep work", breakSeconds: 20 * 60, isLong: true))
+        XCTAssertEqual(state.phaseAlert, .workEnded(taskID: a.id, taskTitle: "Deep work", breakSeconds: 20 * 60, isLong: true))
     }
 
     func testEarlyStopBreaksTheRow() {
@@ -647,6 +663,64 @@ final class AppStateTests: XCTestCase {
         let settings = try JSONDecoder().decode(Settings.self, from: Data(old.utf8))
         XCTAssertEqual(settings.longBreakSeconds, 20 * 60)
         XCTAssertEqual(settings.sessionsBeforeLongBreak, 3)
+    }
+
+    func testManualBreaksRunForTheirSettingsLength() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startBreak(long: false)
+        XCTAssertEqual(state.phase, .breakTime)
+        XCTAssertFalse(state.isLongBreak)
+        XCTAssertEqual(state.remainingSeconds, 5 * 60)
+        XCTAssertEqual(state.nextTask?.id, a.id, "the banner points at the first open task")
+        // A second press swaps the running break for the other kind.
+        state.startBreak(long: true)
+        XCTAssertTrue(state.isLongBreak)
+        XCTAssertEqual(state.remainingSeconds, 20 * 60)
+        now = now.addingTimeInterval(20 * 60)
+        state.tick()
+        XCTAssertEqual(state.phase, .idle)
+    }
+
+    func testManualBreakIsRefusedWhileASessionRuns() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        state.startTask(id: a.id)
+        state.startBreak(long: false)
+        XCTAssertEqual(state.phase, .work)
+        state.pause()
+        state.startBreak(long: true)
+        XCTAssertEqual(state.phase, .paused)
+    }
+
+    /// A long break taken by hand starts the row over, as an earned one does;
+    /// a short one leaves it alone.
+    func testManualLongBreakStartsTheRowOver() {
+        let state = makeState()
+        let (a, _) = seedTwoTasks(in: state)
+        for _ in 0..<2 {
+            state.startTask(id: a.id)
+            state.finishTaskDone()
+            state.skipBreak()
+        }
+        state.startBreak(long: false)
+        XCTAssertEqual(state.sessionsInARow, 2)
+        state.startBreak(long: true)
+        XCTAssertEqual(state.sessionsInARow, 0)
+        state.startTask(id: a.id)
+        state.finishTaskDone()
+        XCTAssertFalse(state.isLongBreak)
+    }
+
+    func testManualBreakUnlocksAndSurvivesARestart() {
+        let state = makeState()
+        let listener = RecordingLockListener()
+        state.lockListener = listener
+        state.startBreak(long: true)
+        XCTAssertEqual(listener.calls.last?.active, false)
+        let relaunched = makeState()
+        XCTAssertEqual(relaunched.phase, .breakTime)
+        XCTAssertTrue(relaunched.isLongBreak)
     }
 
     func testSkipToBreakDoesNotCredit() {
@@ -967,6 +1041,140 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.phase, .idle)
     }
 
+    // MARK: Session counts
+
+    /// Runs the task's timer to the end, then lets the break run out too.
+    private func runOut(_ state: AppState, _ task: TaskItem) {
+        state.startTask(id: task.id)
+        now = now.addingTimeInterval(task.durationSeconds)
+        state.tick()
+        XCTAssertEqual(state.phase, .breakTime)
+        state.skipBreak()
+    }
+
+    func testARunOutChecksTheTaskOff() {
+        let state = makeState()
+        let task = state.addTask(title: "Read the RFC", durationSeconds: 600, presetID: nil, overrides: [], doneWhen: " Questions answered ")
+        XCTAssertEqual(task.doneWhen, "Questions answered")
+        let copy = state.duplicateTask(id: task.id)!
+        runOut(state, task)
+        XCTAssertTrue(state.tasks[0].isDone(on: state.todayKey), "a run-out finishes the task, even with copies left")
+        XCTAssertEqual(state.nextUpID(on: state.todayKey), copy.id, "the next session comes up next")
+    }
+
+    func testDuplicateAddsAnOpenSessionRightAfterTheTask() throws {
+        let state = makeState()
+        let task = state.addTask(title: "Draft", durationSeconds: 600, presetID: nil, overrides: [], priority: 1, doneWhen: "Outline sent")
+        state.addTask(title: "Other", durationSeconds: 600, presetID: nil, overrides: [])
+        XCTAssertEqual(state.sessionProgress(for: task, on: state.todayKey).total, 1, "a fresh task is one session")
+        let copy = try XCTUnwrap(state.duplicateTask(id: task.id))
+        XCTAssertEqual(state.tasks.map(\.id), [task.id, copy.id, state.tasks[2].id])
+        XCTAssertNotEqual(copy.id, task.id)
+        XCTAssertEqual(copy.seriesID, task.id)
+        XCTAssertEqual(copy.title, "Draft")
+        XCTAssertEqual(copy.priority, 1)
+        XCTAssertEqual(copy.doneWhen, "Outline sent")
+        XCTAssertEqual(state.phase, .idle, "duplicating never starts a session")
+        XCTAssertTrue(state.isOpen(copy, on: state.todayKey))
+        let progress = state.sessionProgress(for: task, on: state.todayKey)
+        XCTAssertEqual(progress.done, 0)
+        XCTAssertEqual(progress.total, 2)
+        XCTAssertEqual(state.sessionProgress(for: state.tasks[2], on: state.todayKey).total, 1, "other tasks are their own series")
+    }
+
+    func testSessionProgressCountsCheckOffsAcrossTheSeries() throws {
+        let state = makeState()
+        let task = state.addTask(title: "Review", durationSeconds: 600, presetID: nil, overrides: [])
+        let second = try XCTUnwrap(state.duplicateTask(id: task.id))
+        let third = try XCTUnwrap(state.duplicateTask(id: second.id))
+        XCTAssertEqual(third.seriesID, task.id, "a copy of a copy stays in the series")
+        let today = state.todayKey
+        state.setTaskDone(id: task.id, done: true, on: today)
+        var progress = state.sessionProgress(for: third, on: today)
+        XCTAssertEqual(progress.done, 1)
+        XCTAssertEqual(progress.total, 3)
+        state.setTaskDone(id: second.id, done: true, on: today)
+        state.setTaskDone(id: third.id, done: true, on: today)
+        progress = state.sessionProgress(for: task, on: today)
+        XCTAssertEqual(progress.done, 3, "all done reads 3/3")
+        let tomorrow = DayKey.key(byAdding: 1, to: today)!
+        XCTAssertEqual(state.sessionProgress(for: task, on: tomorrow).done, 3, "a finished one-off stays counted")
+    }
+
+    func testRepeatingSeriesCountsPerDay() throws {
+        let state = makeState()
+        let daily = state.addTask(title: "Inbox", durationSeconds: 600, presetID: nil, overrides: [], repeatDaily: true)
+        let copy = try XCTUnwrap(state.duplicateTask(id: daily.id))
+        XCTAssertTrue(copy.repeatDaily)
+        let today = state.todayKey
+        state.setTaskDone(id: daily.id, done: true, on: today)
+        XCTAssertEqual(state.sessionProgress(for: daily, on: today).done, 1)
+        let tomorrow = DayKey.key(byAdding: 1, to: today)!
+        XCTAssertEqual(state.sessionProgress(for: daily, on: tomorrow).done, 0, "a repeating series starts over each day")
+    }
+
+    func testARerunJoinsTheSeriesAndSeriesPersists() throws {
+        let state = makeState()
+        let task = state.addTask(title: "Draft", durationSeconds: 600, presetID: nil, overrides: [])
+        runOut(state, task)
+        let copy = try XCTUnwrap(state.repeatTask(id: task.id))
+        XCTAssertEqual(copy.seriesID, task.id)
+        let progress = state.sessionProgress(for: copy, on: state.todayKey)
+        XCTAssertEqual(progress.done, 1)
+        XCTAssertEqual(progress.total, 2)
+        let reloaded = makeState().tasks
+        XCTAssertEqual(reloaded.map(\.seriesID), [task.id, task.id])
+    }
+
+    // MARK: Goals
+
+    func testGoalsHoldTasksAndPersist() {
+        let state = makeState()
+        let goal = state.addGoal(title: " Ship the PoC ", doneWhen: "Demo given", priority: 1)
+        XCTAssertEqual(goal.title, "Ship the PoC")
+        let step = state.addTask(title: "Write the spec", durationSeconds: 600, presetID: nil, overrides: [], goalID: goal.id)
+        XCTAssertEqual(step.goalID, goal.id)
+        let stray = state.addTask(title: "Stray", durationSeconds: 600, presetID: nil, overrides: [], goalID: UUID())
+        XCTAssertNil(stray.goalID, "an unknown goal is ignored")
+
+        let reloaded = makeState()
+        XCTAssertEqual(reloaded.goals, [goal])
+        XCTAssertEqual(reloaded.tasks[0].goalID, goal.id)
+    }
+
+    func testFinishingAGoalLeavesItsTasks() {
+        let state = makeState()
+        let goal = state.addGoal(title: "Ship the PoC")
+        _ = state.addTask(title: "Step", durationSeconds: 600, presetID: nil, overrides: [], goalID: goal.id)
+        state.setGoalDone(id: goal.id, done: true)
+        XCTAssertEqual(state.goals[0].doneAt, now)
+        XCTAssertTrue(state.openGoals.isEmpty)
+        XCTAssertEqual(state.openTasks(on: state.todayKey).count, 1, "its open task stays on the list")
+        state.setGoalDone(id: goal.id, done: false)
+        XCTAssertEqual(state.openGoals.map(\.id), [goal.id])
+    }
+
+    func testDeletingAGoalDetachesItsTasks() {
+        let state = makeState()
+        let goal = state.addGoal(title: "Ship the PoC")
+        _ = state.addTask(title: "Step", durationSeconds: 600, presetID: nil, overrides: [], goalID: goal.id)
+        state.deleteGoal(id: goal.id)
+        XCTAssertTrue(state.goals.isEmpty)
+        XCTAssertNil(state.tasks[0].goalID)
+        XCTAssertNil(makeState().tasks[0].goalID, "persisted")
+    }
+
+    func testArchiveWithoutGoalsStillDecodes() throws {
+        let state = makeState()
+        _ = state.addTask(title: "Old", durationSeconds: 600, presetID: nil, overrides: [])
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        XCTAssertNotNil(json.removeValue(forKey: "goals"))
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        let reloaded = makeState()
+        XCTAssertEqual(reloaded.tasks.map(\.title), ["Old"], "an archive from before goals keeps its tasks")
+        XCTAssertTrue(reloaded.goals.isEmpty)
+    }
+
     // MARK: History
 
     func testEveryKindOfEndIsRecorded() {
@@ -1157,14 +1365,6 @@ final class AppStateTests: XCTestCase {
         state.applyPickedAllowlist(taskID: a.id, rules: [], savedPresetID: saved.id)
         XCTAssertEqual(state.activeTask?.presetID, saved.id)
         XCTAssertEqual(state.activeTask?.overrides, [])
-        XCTAssertEqual(state.defaultPresetID, saved.id, "the saved preset becomes the last used one")
-    }
-
-    func testDefaultPresetFollowsLastUsed() {
-        let state = makeState()
-        let comms = state.preset(named: "Comms")!
-        state.addTask(title: "T", durationSeconds: 1500, presetID: comms.id, overrides: [])
-        XCTAssertEqual(state.defaultPresetID, comms.id)
     }
 
     // MARK: Lock notifications
@@ -1379,6 +1579,91 @@ final class DayAndOrderTests: XCTestCase {
         XCTAssertEqual(state.activeTaskID, a.id)
     }
 
+    private func setSort(_ state: AppState, _ sort: TaskSort) {
+        var settings = state.settings
+        settings.taskSort = sort
+        state.updateSettings(settings)
+    }
+
+    func testNextUpFollowsTheChosenSort() {
+        let state = makeState()
+        let medium = state.addTask(title: "Medium", durationSeconds: 600, presetID: nil, overrides: [])
+        now = now.addingTimeInterval(-3600)
+        let high = state.addTask(title: "High, created first", durationSeconds: 600, presetID: nil, overrides: [], priority: 1)
+        XCTAssertEqual(state.nextUpID(on: state.todayKey), medium.id, "manual: list order")
+        setSort(state, .priority)
+        XCTAssertEqual(state.nextUpID(on: state.todayKey), high.id, "priority: high first, as the panel shows")
+        XCTAssertEqual(state.nextUpTask?.id, high.id, "the start shortcut starts it")
+        setSort(state, .created)
+        XCTAssertEqual(state.nextUpID(on: state.todayKey), high.id, "created: oldest first")
+        XCTAssertEqual(state.nextUpID(on: state.todayKey, excluding: high.id), medium.id)
+    }
+
+    func testChangingTheSortDuringABreakUpdatesNextUp() {
+        let state = makeState()
+        let first = state.addTask(title: "First", durationSeconds: 600, presetID: nil, overrides: [])
+        let medium = state.addTask(title: "Medium", durationSeconds: 600, presetID: nil, overrides: [])
+        let high = state.addTask(title: "High", durationSeconds: 600, presetID: nil, overrides: [], priority: 1)
+        state.startTask(id: first.id)
+        state.finishTaskDone()
+        XCTAssertEqual(state.nextTask?.id, medium.id)
+        setSort(state, .priority)
+        XCTAssertEqual(state.nextTask?.id, high.id, "the break banner follows the new sort")
+    }
+
+    private func prioritySorted(_ state: AppState) -> [String] {
+        state.sortedOpen(state.openTasks(on: state.todayKey), for: .priority).map(\.title)
+    }
+
+    func testPriorityMoveStaysWithinItsPriority() {
+        let state = makeState()
+        let h1 = state.addTask(title: "H1", durationSeconds: 600, presetID: nil, overrides: [], priority: 1)
+        let m1 = state.addTask(title: "M1", durationSeconds: 600, presetID: nil, overrides: [])
+        let h2 = state.addTask(title: "H2", durationSeconds: 600, presetID: nil, overrides: [], priority: 1)
+        let m2 = state.addTask(title: "M2", durationSeconds: 600, presetID: nil, overrides: [])
+        XCTAssertEqual(prioritySorted(state), ["H1", "H2", "M1", "M2"])
+
+        state.moveTaskWithinPriority(id: h2.id, before: h1.id)
+        XCTAssertEqual(prioritySorted(state), ["H2", "H1", "M1", "M2"])
+        XCTAssertEqual(state.tasks.map(\.title), ["H2", "M1", "H1", "M2"], "only the high slots trade places")
+
+        state.moveTaskWithinPriority(id: m2.id, before: m1.id)
+        XCTAssertEqual(prioritySorted(state), ["H2", "H1", "M2", "M1"])
+
+        XCTAssertFalse(state.canMoveTaskWithinPriority(id: m1.id, before: h1.id), "a medium cannot land among highs")
+        XCTAssertFalse(state.canMoveTaskWithinPriority(id: h1.id, before: nil), "a high cannot land after the mediums")
+        state.moveTaskWithinPriority(id: m1.id, before: h2.id)
+        XCTAssertEqual(prioritySorted(state), ["H2", "H1", "M2", "M1"], "refused moves change nothing")
+        XCTAssertEqual(makeState().tasks.map(\.title), ["H2", "M2", "H1", "M1"], "persisted")
+    }
+
+    func testPriorityMoveToTheEndOfItsGroup() {
+        let state = makeState()
+        let h1 = state.addTask(title: "H1", durationSeconds: 600, presetID: nil, overrides: [], priority: 1)
+        let m1 = state.addTask(title: "M1", durationSeconds: 600, presetID: nil, overrides: [])
+        _ = state.addTask(title: "H2", durationSeconds: 600, presetID: nil, overrides: [], priority: 1)
+        // Dropping on the first medium row lands after the last high.
+        state.moveTaskWithinPriority(id: h1.id, before: m1.id)
+        XCTAssertEqual(prioritySorted(state), ["H2", "H1", "M1"])
+
+        let m2 = state.addTask(title: "M2", durationSeconds: 600, presetID: nil, overrides: [])
+        state.moveTaskWithinPriority(id: m1.id, before: nil)
+        XCTAssertEqual(prioritySorted(state), ["H2", "H1", "M2", "M1"])
+        XCTAssertTrue(state.canMoveTaskWithinPriority(id: m2.id, before: nil))
+    }
+
+    func testPriorityMoveNeverCrossesTheRunningTask() {
+        let state = makeState()
+        let a = state.addTask(title: "A", durationSeconds: 600, presetID: nil, overrides: [])
+        let b = state.addTask(title: "B", durationSeconds: 600, presetID: nil, overrides: [])
+        let c = state.addTask(title: "C", durationSeconds: 600, presetID: nil, overrides: [])
+        state.startTask(id: b.id)
+        XCTAssertFalse(state.canMoveTaskWithinPriority(id: c.id, before: a.id))
+        XCTAssertFalse(state.canMoveTaskWithinPriority(id: b.id, before: a.id), "the running task stays put")
+        state.moveTaskWithinPriority(id: c.id, before: a.id)
+        XCTAssertEqual(state.tasks.map(\.title), ["A", "B", "C"])
+    }
+
     func testTaskDecodesWithoutDoneAt() throws {
         let json = """
         {"id":"7E7C5D02-3B4E-4B6D-9E2B-1B2C3D4E5F60","title":"Old","durationSeconds":1500,"overrides":[],"doneDays":["2026-09-01"]}
@@ -1389,6 +1674,8 @@ final class DayAndOrderTests: XCTestCase {
         XCTAssertFalse(task.repeatDaily, "older archives default to a one-off task")
         XCTAssertEqual(task.priority, 2, "older archives default to medium priority")
         XCTAssertEqual(task.createdDate, Date.distantPast, "older archives have no createdDate")
+        XCTAssertEqual(task.seriesID, task.id, "older archives start their own series")
+        XCTAssertEqual(task.doneWhen, "")
         let data = try JSONEncoder().encode(task)
         XCTAssertEqual(try JSONDecoder().decode(TaskItem.self, from: data), task)
     }
@@ -1433,27 +1720,26 @@ final class DayAndOrderTests: XCTestCase {
         let b = state.addTask(title: "B", durationSeconds: 600, presetID: nil, overrides: [])
         let dayOne = state.todayKey
         state.setTaskDone(id: repeatable.id, done: true) // repeat done today
-        // A repeating task checked off today stays offered (done repeating
-        // tasks are due again at once); the one-off b is still open too.
-        XCTAssertEqual(state.openTasks(on: dayOne).map(\.title), ["Standup", "B"])
-        XCTAssertEqual(state.nextUpID(on: dayOne), repeatable.id, "a done repeating task is due again at once")
+        // A repeating task checked off today is spent for today: only the
+        // one-off b is still open.
+        XCTAssertEqual(state.openTasks(on: dayOne).map(\.title), ["B"])
+        XCTAssertEqual(state.nextUpID(on: dayOne), b.id, "a done repeating task waits for tomorrow")
 
-        // Next day: the repeating task is still on the open list, b pending.
+        // Next day: the repeating task is back on the open list, b pending.
         now = Calendar.current.date(byAdding: .day, value: 1, to: now)!
         let dayTwo = state.todayKey
         let titles = state.openTasks(on: dayTwo).map(\.title)
-        XCTAssertEqual(titles, ["Standup", "B"], "the repeating task is still there the next day")
+        XCTAssertEqual(titles, ["Standup", "B"], "the repeating task is back the next day")
         XCTAssertEqual(state.nextUpID(on: dayTwo), repeatable.id, "the repeating task is due first")
     }
 
-    func testCheckingOffARepeatingTaskKeepsItListedToday() {
+    func testCheckingOffARepeatingTaskMovesItToDoneForToday() {
         let state = makeState()
         let repeatable = state.addTask(title: "Standup", durationSeconds: 600, presetID: nil, overrides: [], repeatDaily: true)
         state.setTaskDone(id: repeatable.id, done: true)
-        XCTAssertEqual(state.openTasks(on: state.todayKey).map(\.title), ["Standup"],
-                       "a repeating task checked off today is still due (offered to run again)")
-        XCTAssertEqual(state.nextUpID(on: state.todayKey), repeatable.id,
-                       "and it is the next thing up even though it is done today")
+        XCTAssertTrue(state.openTasks(on: state.todayKey).isEmpty,
+                      "a repeating task checked off today leaves the open list")
+        XCTAssertNil(state.nextUpID(on: state.todayKey), "and is not next up again today")
         XCTAssertEqual(state.doneTasks(on: state.todayKey).map(\.title), ["Standup"],
                        "its check-off for today still shows under Done")
     }

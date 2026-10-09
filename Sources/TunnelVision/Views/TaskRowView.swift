@@ -28,13 +28,16 @@ struct TaskRowView: View {
     @Binding var dragID: TaskItem.ID?
     @Binding var dropTargetID: TaskItem.ID?
     let onReorder: (TaskItem.ID, TaskItem.ID?) -> Void
+    /// Whether the dragged task may land before the given row (nil: the end).
+    let canReorder: (TaskItem.ID, TaskItem.ID?) -> Bool
 
     @State private var hovering = false
 
     init(model: AppState, task: TaskItem, day: String? = nil, allowsReorder: Bool = true,
          onEdit: @escaping () -> Void,
          dragID: Binding<TaskItem.ID?>, dropTargetID: Binding<TaskItem.ID?>,
-         onReorder: @escaping (TaskItem.ID, TaskItem.ID?) -> Void) {
+         onReorder: @escaping (TaskItem.ID, TaskItem.ID?) -> Void,
+         canReorder: @escaping (TaskItem.ID, TaskItem.ID?) -> Bool = { _, _ in true }) {
         self.model = model
         self.task = task
         self.day = day ?? model.todayKey
@@ -43,6 +46,7 @@ struct TaskRowView: View {
         _dragID = dragID
         _dropTargetID = dropTargetID
         self.onReorder = onReorder
+        self.canReorder = canReorder
     }
 
     private var isToday: Bool { day == model.todayKey }
@@ -50,7 +54,7 @@ struct TaskRowView: View {
     private var isDone: Bool { task.isDone(on: day) }
     /// Open tasks move freely, session or not; the running one and done
     /// ones stay where they are. Reordering is also disabled when the list
-    /// is sorted by something other than manual.
+    /// is sorted by creation date.
     private var reorderable: Bool { isToday && !isActive && !isDone && allowsReorder }
     private var canStart: Bool { isToday && (model.phase == .idle || model.phase == .breakTime) }
 
@@ -72,7 +76,8 @@ struct TaskRowView: View {
                 dropTargetID: $dropTargetID,
                 targetID: task.id,
                 enabled: reorderable,
-                onReorder: onReorder
+                onReorder: onReorder,
+                canReorder: canReorder
             ))
     }
 
@@ -126,6 +131,7 @@ struct TaskRowView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            .help(task.doneWhen.isEmpty ? "" : "Done when: \(task.doneWhen)")
             Spacer(minLength: 4)
             trailingAction
         }
@@ -139,6 +145,9 @@ struct TaskRowView: View {
 
     private var subtitle: String {
         var parts: [String] = []
+        if let goal = model.goal(id: task.goalID) {
+            parts.append("◎ \(goal.title)")
+        }
         if let presetID = task.presetID, let preset = model.presets.first(where: { $0.id == presetID }) {
             parts.append(preset.name)
         } else if task.overrides.isEmpty {
@@ -150,6 +159,10 @@ struct TaskRowView: View {
             parts.append("Repeats daily")
         }
         parts.append(TimeFormat.minutes(task.durationSeconds))
+        let progress = model.sessionProgress(for: task, on: day)
+        if progress.total > 1 {
+            parts.append("\(progress.done)/\(progress.total) sessions")
+        }
         if isDone, let time = task.doneTime(on: day) {
             parts.append("done " + time.formatted(date: .omitted, time: .shortened))
         }
@@ -297,6 +310,8 @@ struct TaskRowView: View {
             Button(isDone ? "Uncheck" : "Check off") { model.setTaskDone(id: task.id, done: !isDone, on: day) }
             Divider()
             Button("Edit…") { onEdit() }
+            Button("Duplicate") { model.duplicateTask(id: task.id) }
+                .disabled(!isToday)
             Button("Delete", role: .destructive) { model.deleteTask(id: task.id) }
                 .disabled(isActive)
         }
@@ -312,14 +327,15 @@ private struct RowDropDelegate: DropDelegate {
     let targetID: TaskItem.ID
     let enabled: Bool
     let onReorder: (TaskItem.ID, TaskItem.ID?) -> Void
+    let canReorder: (TaskItem.ID, TaskItem.ID?) -> Bool
 
     func dropEntered(info: DropInfo) {
-        guard enabled, let id = dragID, id != targetID else { return }
+        guard enabled, let id = dragID, id != targetID, canReorder(id, targetID) else { return }
         dropTargetID = targetID
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard enabled, let id = dragID, id != targetID else { return nil }
+        guard enabled, let id = dragID, id != targetID, canReorder(id, targetID) else { return nil }
         dropTargetID = targetID
         return DropProposal(operation: .move)
     }
@@ -329,7 +345,7 @@ private struct RowDropDelegate: DropDelegate {
             dragID = nil
             dropTargetID = nil
         }
-        guard enabled, let id = dragID, id != targetID else { return false }
+        guard enabled, let id = dragID, id != targetID, canReorder(id, targetID) else { return false }
         onReorder(id, targetID)
         return true
     }

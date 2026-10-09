@@ -1,0 +1,10 @@
+{
+  "name": "tunnelvision",
+  "version": "0.2.0",
+  "description": "Plan the day, break work into goals, suggest tasks, review what got done and close out the day in Tunnel Vision, the menu bar focus timer. Needs the app installed in /Applications.",
+  "author": {
+    "name": "Vilfred Sikker"
+  },
+  "repository": "https://github.com/VilfredSikker/tunnel-vision",
+  "keywords": ["focus", "pomodoro", "tasks", "planning"]
+}

@@ -16,7 +16,7 @@ enum SessionPhase: String, Codable, Equatable, Sendable {
 /// done) are not announced: they already know.
 enum PhaseAlert: Equatable, Sendable {
     /// Work time ran out; the break has begun.
-    case workEnded(taskTitle: String, breakSeconds: TimeInterval, isLong: Bool = false)
+    case workEnded(taskID: UUID? = nil, taskTitle: String, breakSeconds: TimeInterval, isLong: Bool = false)
     /// The break ran out; nothing is locked until the next start. The next
     /// task is fixed here so the popup starts the task it names, even if
     /// the list changes while it is up.
@@ -62,8 +62,8 @@ final class AppState {
 
     private(set) var tasks: [TaskItem] = []
     private(set) var presets: [Preset] = []
+    private(set) var goals: [Goal] = []
     private(set) var settings: Settings = .default
-    private(set) var lastUsedPresetID: UUID?
     private(set) var todayCount: Int = 0
     private(set) var countDay: String = ""
     /// Plants of today's ended sessions, each as far as it got.
@@ -138,6 +138,10 @@ final class AppState {
     /// Every ended work run, oldest first.
     private(set) var history: [SessionRecord] = []
 
+    /// Background tasks on the herdr side: agents, prompts waiting for an
+    /// answer, dispatch. The app connects it to herdr with `attach`.
+    let background: BackgroundAgents
+
     // MARK: Machinery
 
     private let fileURL: URL
@@ -161,8 +165,10 @@ final class AppState {
         self.fileURL = fileURL ?? AppIdentity.supportDirectory.appendingPathComponent("data.json")
         self.historyLog = HistoryLog(fileURL: self.fileURL.deletingLastPathComponent().appendingPathComponent("history.jsonl"))
         self.clock = clock
+        self.background = BackgroundAgents(clock: clock)
         history = historyLog.load()
         loadOrSeed()
+        background.model = self
         if autoTick {
             startLoop()
         }
@@ -270,7 +276,10 @@ final class AppState {
         presetID: UUID?,
         overrides: [Rule],
         repeatDaily: Bool = false,
-        priority: Int = 2
+        priority: Int = 2,
+        doneWhen: String = "",
+        goalID: Goal.ID? = nil,
+        background: BackgroundInfo? = nil
     ) -> TaskItem {
         let task = TaskItem(
             title: title.trimmingCharacters(in: .whitespaces),
@@ -279,7 +288,10 @@ final class AppState {
             overrides: overrides.filter(\.isComplete),
             repeatDaily: repeatDaily,
             priority: min(3, max(1, priority)),
-            createdDate: clock()
+            createdDate: clock(),
+            doneWhen: doneWhen.trimmingCharacters(in: .whitespacesAndNewlines),
+            goalID: goal(id: goalID)?.id,
+            background: background
         )
         tasks.append(task)
         if phase == .breakTime {
@@ -287,7 +299,6 @@ final class AppState {
             // when everything else was already done).
             recomputeNextTask()
         }
-        rememberPreset(presetID)
         persist()
         return task
     }
@@ -297,8 +308,10 @@ final class AppState {
         var updated = task
         updated.title = task.title.trimmingCharacters(in: .whitespaces)
         updated.overrides = task.overrides.filter(\.isComplete)
+        updated.goalID = goal(id: task.goalID)?.id
+        updated.doneWhen = task.doneWhen.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.background = Self.mergedBackground(edited: task.background, stored: tasks[index].background)
         tasks[index] = updated
-        rememberPreset(task.presetID)
         persist()
         if updated.id == activeTaskID, phase == .work || phase == .paused {
             notifyLockChange()
@@ -327,6 +340,107 @@ final class AppState {
         }
         if phase == .breakTime {
             recomputeNextTask()
+        }
+        persist()
+    }
+
+    /// Moves `id` before `targetID` in today's priority-sorted list (the end
+    /// when nil), as long as it stays among tasks of its own priority:
+    /// dropping on the first row of the next group puts it last in its own.
+    /// Only that group's tasks trade places; every other task keeps its slot,
+    /// so the manual order is otherwise untouched.
+    func moveTaskWithinPriority(id: TaskItem.ID, before targetID: TaskItem.ID?) {
+        guard let reordered = priorityMove(id: id, before: targetID) else { return }
+        tasks = reordered
+        if phase == .breakTime {
+            recomputeNextTask()
+        }
+        persist()
+    }
+
+    func canMoveTaskWithinPriority(id: TaskItem.ID, before targetID: TaskItem.ID?) -> Bool {
+        priorityMove(id: id, before: targetID) != nil
+    }
+
+    /// The task list after a within-priority move, or nil when the move is
+    /// not allowed. The same rules as `moveTask` apply: the running task stays
+    /// put and nothing crosses it.
+    private func priorityMove(id: TaskItem.ID, before targetID: TaskItem.ID?) -> [TaskItem]? {
+        guard id != activeTaskID, id != targetID else { return nil }
+        let shown = sortedOpen(openTasks(on: todayKey), for: .priority)
+        guard let moving = shown.first(where: { $0.id == id }) else { return nil }
+        var reshown = shown.filter { $0.id != id }
+        if let targetID {
+            guard let to = reshown.firstIndex(where: { $0.id == targetID }) else { return nil }
+            reshown.insert(moving, at: to)
+        } else {
+            reshown.append(moving)
+        }
+        // The list must still read as sorted by priority.
+        guard zip(reshown, reshown.dropFirst()).allSatisfy({ $0.priority <= $1.priority }) else { return nil }
+
+        let group = reshown.filter { $0.priority == moving.priority }
+        let groupIDs = Set(group.map(\.id))
+        let slots = tasks.indices.filter { groupIDs.contains(tasks[$0].id) }
+        var result = tasks
+        for (slot, task) in zip(slots, group) {
+            result[slot] = task
+        }
+        if let activeIndex = tasks.firstIndex(where: { $0.id == activeTaskID }) {
+            let crosses = slots.contains { slot in
+                let before = tasks.firstIndex { $0.id == result[slot].id }!
+                return (before < activeIndex) != (slot < activeIndex)
+            }
+            guard !crosses else { return nil }
+        }
+        return result
+    }
+
+    // MARK: - Goals
+
+    /// Goals not yet finished, in the order they were added.
+    var openGoals: [Goal] { goals.filter { $0.doneAt == nil } }
+
+    func goal(id: Goal.ID?) -> Goal? {
+        guard let id else { return nil }
+        return goals.first { $0.id == id }
+    }
+
+    @discardableResult
+    func addGoal(title: String, doneWhen: String = "", priority: Int = 2) -> Goal {
+        let goal = Goal(
+            title: title.trimmingCharacters(in: .whitespaces),
+            doneWhen: doneWhen.trimmingCharacters(in: .whitespacesAndNewlines),
+            priority: min(3, max(1, priority)),
+            createdDate: clock()
+        )
+        goals.append(goal)
+        persist()
+        return goal
+    }
+
+    func updateGoal(_ goal: Goal) {
+        guard let index = goals.firstIndex(where: { $0.id == goal.id }) else { return }
+        var updated = goal
+        updated.title = goal.title.trimmingCharacters(in: .whitespaces)
+        updated.doneWhen = goal.doneWhen.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.priority = min(3, max(1, goal.priority))
+        goals[index] = updated
+        persist()
+    }
+
+    /// Finishing a goal leaves its tasks alone: open ones stay on the list.
+    func setGoalDone(id: Goal.ID, done: Bool) {
+        guard let index = goals.firstIndex(where: { $0.id == id }) else { return }
+        goals[index].doneAt = done ? clock() : nil
+        persist()
+    }
+
+    /// The goal goes; its tasks stay, no longer part of any goal.
+    func deleteGoal(id: Goal.ID) {
+        goals.removeAll { $0.id == id }
+        for index in tasks.indices where tasks[index].goalID == id {
+            tasks[index].goalID = nil
         }
         persist()
     }
@@ -362,15 +476,16 @@ final class AppState {
         persist()
     }
 
-    /// Tasks still offered on the day: not done, and not retired. A done
-    /// one-off is retired from the day after its check-off; a repeating task
-    /// is never retired, so it stays on the list even when checked off today.
+    /// Tasks still offered on the day: not done on it, and not retired. A
+    /// task checked off on the day sits under Done instead. A done one-off is
+    /// retired from the day after its check-off; a repeating task is never
+    /// retired, so it comes back the next day.
     func openTasks(on day: String) -> [TaskItem] {
         tasks.filter { isOpen($0, on: day) }
     }
 
     func isOpen(_ task: TaskItem, on day: String) -> Bool {
-        task.isDone(on: day) ? task.repeatDaily : !task.isRetired(by: day)
+        !task.isDone(on: day) && !task.isRetired(by: day)
     }
 
     /// Applies a sort to a list of open tasks. Done tasks stay
@@ -382,7 +497,11 @@ final class AppState {
         case .created:
             return tasks.sorted { $0.createdDate < $1.createdDate }
         case .priority:
-            return tasks.sorted { $0.priority < $1.priority }
+            // Ties keep list order, so the order within a priority is the
+            // manual order and can be dragged.
+            return tasks.enumerated()
+                .sorted { ($0.element.priority, $0.offset) < ($1.element.priority, $1.offset) }
+                .map(\.element)
         }
     }
 
@@ -402,13 +521,24 @@ final class AppState {
             .map(\.element)
     }
 
-    /// The first task still due on the day: the one that starts on a shortcut
-    /// or appears on the break banner. A one-off done on the day is spent; a
-    /// repeating one is due again every day, including one already checked off.
-    func nextUpID(on day: String) -> TaskItem.ID? {
-        tasks.first { task in
-            task.isDone(on: day) ? task.repeatDaily : !task.isRetired(by: day)
-        }?.id
+    /// The first task still due on the day, in the order the panel shows
+    /// (the chosen sort): the one that starts on a shortcut or appears on the
+    /// break banner. A task checked off on the day is spent for that day; a
+    /// repeating one is due again the next. `excluding`
+    /// skips a task, such as the one already running. Background tasks are
+    /// never next up: an agent works them, not a focus session.
+    func nextUpID(on day: String, excluding skipped: TaskItem.ID? = nil) -> TaskItem.ID? {
+        sortedOpen(openTasks(on: day), for: settings.taskSort)
+            .first { $0.id != skipped && !$0.isBackground }?.id
+    }
+
+    /// The task's series as sessions: `total` counts the task and every copy
+    /// of it, `done` those checked off by the day (on the day itself for a
+    /// repeating task, which starts over each day).
+    func sessionProgress(for task: TaskItem, on day: String) -> (done: Int, total: Int) {
+        let series = tasks.filter { $0.seriesID == task.seriesID }
+        let done = series.filter { $0.isDone(on: day) || $0.isRetired(by: day) }.count
+        return (done, series.count)
     }
 
     /// Puts the given tasks first, in that order; everything else follows in
@@ -441,21 +571,81 @@ final class AppState {
             }
         }
         tasks[index].presetID = presetID
-        rememberPreset(presetID)
         persist()
         if id == activeTaskID, phase == .work || phase == .paused {
             notifyLockChange()
         }
     }
 
+    // MARK: - Background tasks
+
+    /// An edit decides whether the task is background and who it goes to;
+    /// the run state (status, sent time, report) stays the stored one, so
+    /// an editor opened before the agent moved on cannot roll it back. A
+    /// new agent for a task not sent yet starts it over as waiting; a sent
+    /// task keeps its agent.
+    static func mergedBackground(edited: BackgroundInfo?, stored: BackgroundInfo?) -> BackgroundInfo? {
+        guard let edited else { return nil }
+        guard var merged = stored else { return edited }
+        if merged.sentAt == nil, edited.assignee != merged.assignee {
+            merged.assignee = edited.assignee
+            merged.status = .waiting
+        }
+        return merged
+    }
+
+    /// Ready to go out with the next focus session: a background task with
+    /// a title, a done-when and an agent, not sent yet, and on today's list.
+    func isReadyBackground(_ task: TaskItem) -> Bool {
+        guard let info = task.background else { return false }
+        return !task.title.trimmingCharacters(in: .whitespaces).isEmpty
+            && !task.doneWhen.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && info.assignee != nil
+            && info.status == .waiting
+            && info.sentAt == nil
+            && isOpen(task, on: todayKey)
+    }
+
+    /// Every ready background task, in list order.
+    func readyBackgroundTasks() -> [TaskItem] {
+        tasks.filter(isReadyBackground)
+    }
+
+    /// Changes one task's background state and saves. For the dispatcher;
+    /// a task that is not (or no longer) background is left alone.
+    func updateBackground(id: TaskItem.ID, _ change: (inout BackgroundInfo) -> Void) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }), var info = tasks[index].background else { return }
+        change(&info)
+        guard info != tasks[index].background else { return }
+        tasks[index].background = info
+        persist()
+        background.watchIfNeeded()
+    }
+
+    /// The agent's report: the task is finished and waits for the user's
+    /// review. False for a task that is not background.
+    @discardableResult
+    func reportBackground(id: TaskItem.ID, summary: String, link: String?) -> Bool {
+        guard tasks.first(where: { $0.id == id })?.isBackground == true else { return false }
+        let trimmedLink = link?.trimmingCharacters(in: .whitespacesAndNewlines)
+        updateBackground(id: id) {
+            $0.summary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            $0.link = (trimmedLink?.isEmpty ?? true) ? nil : trimmedLink
+            $0.status = .review
+        }
+        return true
+    }
+
+    /// Entering the work phase sends the ready background tasks along.
+    private func startBackgroundWork() {
+        guard settings.startBackgroundTasksWithFocus else { return }
+        background.focusStarted()
+    }
+
     // MARK: - Presets
 
     var builtinPresetID: UUID? {
         presets.first { $0.isBuiltIn }?.id
-    }
-
-    var codingPresetID: UUID? {
-        presets.first { $0.name == "Coding" }?.id
     }
 
     func preset(named name: String) -> Preset? {
@@ -511,7 +701,6 @@ final class AppState {
     func deletePreset(id: UUID) -> Bool {
         guard let index = presets.firstIndex(where: { $0.id == id }), !presets[index].isBuiltIn else { return false }
         let removed = presets.remove(at: index)
-        if lastUsedPresetID == id { lastUsedPresetID = nil }
         let touchedActiveTask = (phase == .work || phase == .paused) && activeTask?.presetID == id
         for taskIndex in tasks.indices where tasks[taskIndex].presetID == id {
             tasks[taskIndex].presetID = nil
@@ -547,6 +736,10 @@ final class AppState {
 
     func updateSettings(_ new: Settings) {
         settings = new
+        if phase == .breakTime {
+            // The sort decides which task is next up.
+            recomputeNextTask()
+        }
         persist()
     }
 
@@ -555,9 +748,10 @@ final class AppState {
     /// Start a timed run of the given task. Refused while a session runs
     /// (pause or end it first); starting during a break skips the rest of
     /// it. A task already done today can be repeated: it stays checked off
-    /// and each completed run counts as another session.
+    /// and each completed run counts as another session. A background task
+    /// never runs on the timer: its agent works it.
     func startTask(id: TaskItem.ID) {
-        guard let task = tasks.first(where: { $0.id == id }) else { return }
+        guard let task = tasks.first(where: { $0.id == id }), !task.isBackground else { return }
         guard phase != .work, phase != .paused else { return }
         if phase == .breakTime {
             breakEndsAt = nil
@@ -573,12 +767,12 @@ final class AppState {
         growthBaseElapsed = 0
         phase = .work
         phaseAlert = nil
-        rememberPreset(task.presetID)
         persist()
         Self.log.info("session started: task=\(task.title, privacy: .public) duration=\(Int(self.workTotal))s mode=\(self.activePreset?.mode.displayName ?? "none", privacy: .public)")
         notifyLockChange()
         openPresetURLs(for: task)
         onSessionStarted?(task)
+        startBackgroundWork()
     }
 
     /// The preset's "URLs to open when a task starts" (DESIGN_BRIEF §4).
@@ -619,6 +813,7 @@ final class AppState {
         Self.log.info("session resumed: remaining=\(Int(remaining))s")
         // Resuming re-applies the lock for the running task.
         notifyLockChange()
+        startBackgroundWork()
     }
 
     func togglePause() {
@@ -662,12 +857,34 @@ final class AppState {
     /// history. Refused while a session runs.
     @discardableResult
     func repeatTask(id: TaskItem.ID) -> TaskItem? {
-        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return nil }
+        guard let index = tasks.firstIndex(where: { $0.id == id }), !tasks[index].isBackground else { return nil }
         guard phase != .work, phase != .paused else { return nil }
         let copy = tasks[index].repeatedCopy()
         tasks.insert(copy, at: index + 1)
         persist()
         startTask(id: copy.id)
+        return copy
+    }
+
+    /// The time's-up popup's Repeat: the break ends and another session of
+    /// the task that just ran starts at once, as a copy in its series.
+    @discardableResult
+    func repeatEndedTask() -> TaskItem? {
+        guard phase == .breakTime, case .workEnded(let id?, _, _, _) = phaseAlert else { return nil }
+        return repeatTask(id: id)
+    }
+
+    /// One more session of a task: an open copy in the same series goes
+    /// right after it, unchecked and not started.
+    @discardableResult
+    func duplicateTask(id: TaskItem.ID) -> TaskItem? {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return nil }
+        let copy = tasks[index].repeatedCopy()
+        tasks.insert(copy, at: index + 1)
+        if phase == .breakTime {
+            recomputeNextTask()
+        }
+        persist()
         return copy
     }
 
@@ -717,6 +934,25 @@ final class AppState {
     func skipToBreak() {
         guard phase == .work || phase == .paused else { return }
         completeWork(creditSession: false)
+    }
+
+    /// A break taken by hand, with nothing running (during a break it
+    /// replaces the one running). A long one starts the row over, as an
+    /// earned one does. Refused mid-session: "skip to break" ends work.
+    func startBreak(long: Bool) {
+        guard phase == .idle || phase == .breakTime else { return }
+        isLongBreak = long
+        if long {
+            sessionsInARow = 0
+        }
+        let breakSeconds = max(1, long ? settings.longBreakSeconds : settings.breakSeconds)
+        phase = .breakTime
+        breakEndsAt = clock().addingTimeInterval(breakSeconds)
+        phaseAlert = nil
+        recomputeNextTask()
+        persist()
+        Self.log.info("break started by hand: long=\(long) duration=\(Int(breakSeconds))s")
+        notifyLockChange()
     }
 
     func skipBreak() {
@@ -778,14 +1014,14 @@ final class AppState {
     ///   start is announced with a popup.
     private func completeWork(creditSession: Bool, announce: Bool = false) {
         let title = activeTask?.title ?? "Focus session"
+        let endedTaskID = activeTaskID
         recordGrowth()
         recordHistory(creditSession ? .completed : .skippedToBreak)
         if creditSession {
             todayCount += 1
             sessionsInARow += 1
         }
-        if let id = activeTaskID, let index = tasks.firstIndex(where: { $0.id == id }),
-           creditSession {
+        if let id = activeTaskID, let index = tasks.firstIndex(where: { $0.id == id }), creditSession {
             tasks[index].setDone(true, on: todayKey, at: clock())
         }
         // "Next up" is always the first task still not done today: after a
@@ -801,7 +1037,7 @@ final class AppState {
         let breakSeconds = max(1, isLongBreak ? settings.longBreakSeconds : settings.breakSeconds)
         phase = .breakTime
         breakEndsAt = clock().addingTimeInterval(breakSeconds)
-        phaseAlert = announce ? .workEnded(taskTitle: title, breakSeconds: breakSeconds, isLong: isLongBreak) : nil
+        phaseAlert = announce ? .workEnded(taskID: endedTaskID, taskTitle: title, breakSeconds: breakSeconds, isLong: isLongBreak) : nil
         clearRun()
         persist()
         if settings.soundOn {
@@ -858,25 +1094,11 @@ final class AppState {
         historyLog.append(record)
     }
 
-    private func rememberPreset(_ id: UUID?) {
-        if let id, presets.contains(where: { $0.id == id }) {
-            lastUsedPresetID = id
-        }
-    }
-
     /// "Next up" is always the first task still due today. Called on
     /// session completion and whenever the list or check-offs change during a
     /// break (the banner must never point at a done or vanished task).
     private func recomputeNextTask() {
         nextTaskID = nextUpID(on: todayKey)
-    }
-
-    /// The preset an Add-task sheet should be pre-filled with.
-    var defaultPresetID: UUID? {
-        if let lastUsedPresetID, presets.contains(where: { $0.id == lastUsedPresetID }) {
-            return lastUsedPresetID
-        }
-        return codingPresetID
     }
 
     // MARK: - Lock notifications (app enforcement)
@@ -940,7 +1162,6 @@ final class AppState {
         if let savedPresetID, presets.contains(where: { $0.id == savedPresetID }) {
             tasks[index].presetID = savedPresetID
             tasks[index].overrides = []
-            rememberPreset(savedPresetID)
         } else {
             tasks[index].presetID = nil
             tasks[index].overrides = rules.filter(\.isComplete)
@@ -1054,11 +1275,11 @@ final class AppState {
             tasks = archive.tasks
             presets = archive.presets
             settings = archive.settings
-            lastUsedPresetID = archive.lastUsedPresetID
             todayCount = archive.todayCount
             countDay = archive.countDay
             todayGarden = archive.garden
             sessionsInARow = archive.sessionsInARow
+            goals = archive.goals
             restore(archive.session)
             normalizeDay()
             ensureBuiltins()
@@ -1079,7 +1300,6 @@ final class AppState {
         }
         presets = BuiltinPresets.all()
         settings = .default
-        lastUsedPresetID = codingPresetID
         todayCount = 0
         todayGarden = []
         countDay = todayKey
@@ -1115,11 +1335,11 @@ final class AppState {
                 settings: settings,
                 todayCount: todayCount,
                 countDay: countDay,
-                lastUsedPresetID: lastUsedPresetID,
                 removedBuiltinNames: [],
                 garden: todayGarden,
                 session: snapshot,
-                sessionsInARow: sessionsInARow
+                sessionsInARow: sessionsInARow,
+                goals: goals
             )
             let data = try encoder.encode(archive)
             try data.write(to: fileURL, options: .atomic)

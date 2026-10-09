@@ -151,6 +151,16 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
     var priority: Int
     /// When the task was created; used for the "Created" sort.
     var createdDate: Date
+    /// Shared by a task and every copy made of it (re-run or duplicate); each
+    /// copy is one more session of the same work. A fresh task starts its own.
+    var seriesID: UUID
+    /// The outcome that makes the task finished, in the user's words.
+    var doneWhen: String
+    /// The goal this task is a step toward, if any.
+    var goalID: UUID?
+    /// Set when the task is handed to a Claude Code agent in a herdr pane
+    /// instead of being worked in a focus session. Nil: an ordinary task.
+    var background: BackgroundInfo?
 
     init(
         id: UUID = UUID(),
@@ -162,7 +172,11 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
         doneAt: [String: Date] = [:],
         repeatDaily: Bool = false,
         priority: Int = 2,
-        createdDate: Date = Date()
+        createdDate: Date = Date(),
+        seriesID: UUID? = nil,
+        doneWhen: String = "",
+        goalID: UUID? = nil,
+        background: BackgroundInfo? = nil
     ) {
         self.id = id
         self.title = title
@@ -174,7 +188,13 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
         self.repeatDaily = repeatDaily
         self.priority = priority
         self.createdDate = createdDate
+        self.seriesID = seriesID ?? id
+        self.doneWhen = doneWhen
+        self.goalID = goalID
+        self.background = background
     }
+
+    var isBackground: Bool { background != nil }
 
     func isDone(on day: String) -> Bool {
         doneDays.contains(day)
@@ -210,9 +230,10 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
         }
     }
 
-    /// Copies the task's schedule (including repeatDaily) onto a fresh copy.
-    /// Used by the re-run flow so a repeated one-off stays a one-off and a
-    /// repeating task's copy keeps repeating.
+    /// Copies the task's schedule (including repeatDaily) onto a fresh copy in
+    /// the same series. Used by re-run and duplicate, so a repeated one-off
+    /// stays a one-off and a repeating task's copy keeps repeating. A
+    /// background copy keeps its agent and starts unsent.
     func repeatedCopy(id: UUID = UUID()) -> TaskItem {
         TaskItem(
             id: id,
@@ -222,18 +243,23 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
             overrides: overrides,
             repeatDaily: repeatDaily,
             priority: priority,
-            createdDate: createdDate
+            createdDate: createdDate,
+            seriesID: seriesID,
+            doneWhen: doneWhen,
+            goalID: goalID,
+            background: background.map { BackgroundInfo(assignee: $0.assignee) }
         )
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, durationSeconds, presetID, overrides, doneDays, doneAt, repeatDaily, priority, createdDate
+        case id, title, durationSeconds, presetID, overrides, doneDays, doneAt, repeatDaily, priority, createdDate, seriesID, doneWhen, goalID, background
     }
 }
 
 extension TaskItem {
-    /// `doneAt`, `repeatDaily`, `priority`, and `createdDate` arrived after
-    /// v1; older archives keep decoding without them.
+    /// `doneAt`, `repeatDaily`, `priority`, `createdDate`, `seriesID`,
+    /// `doneWhen`, `goalID` and `background` arrived after v1; older archives
+    /// keep decoding without them.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
@@ -246,7 +272,87 @@ extension TaskItem {
         repeatDaily = try container.decodeIfPresent(Bool.self, forKey: .repeatDaily) ?? false
         priority = try container.decodeIfPresent(Int.self, forKey: .priority) ?? 2
         createdDate = try container.decodeIfPresent(Date.self, forKey: .createdDate) ?? Date.distantPast
+        seriesID = try container.decodeIfPresent(UUID.self, forKey: .seriesID) ?? id
+        doneWhen = try container.decodeIfPresent(String.self, forKey: .doneWhen) ?? ""
+        goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
+        background = try container.decodeIfPresent(BackgroundInfo.self, forKey: .background)
     }
+}
+
+// MARK: - Background work
+
+/// The herdr pane a background task goes to, and the Claude Code agent in it.
+struct AgentRef: Codable, Equatable, Hashable, Sendable {
+    /// herdr pane id, such as `w5K:p1`.
+    var paneID: String
+    var workspaceID: String
+    /// The Claude session id herdr reports for the pane, when it knows it.
+    var sessionID: String?
+    /// The workspace label at assignment time; display only.
+    var label: String
+}
+
+/// Where a background task is in its hand-off to the agent.
+enum BackgroundStatus: String, Codable, CaseIterable, Sendable {
+    /// Not sent yet; goes out with the next focus session.
+    case waiting
+    /// The agent was busy; goes out when it turns idle.
+    case queued
+    case running
+    /// The agent is showing a prompt (permission, question, plan approval).
+    case blocked
+    /// The agent finished; the user reviews the result.
+    case review
+    /// The assigned pane no longer exists in herdr.
+    case paneClosed
+
+    /// Sent and not finished: the pane is taken.
+    var holdsPane: Bool { self == .running || self == .blocked }
+}
+
+struct BackgroundInfo: Codable, Equatable, Sendable {
+    var assignee: AgentRef?
+    var status: BackgroundStatus = .waiting
+    /// When the brief went to the agent. Set once; a task is never resent.
+    var sentAt: Date?
+    /// The agent's one-line report when it finished.
+    var summary: String = ""
+    /// What the agent produced (a PR, a file), when it said.
+    var link: String?
+
+    enum CodingKeys: String, CodingKey {
+        case assignee, status, sentAt, summary, link
+    }
+}
+
+extension BackgroundInfo {
+    /// Every key is optional, and an unknown status reads as waiting (or
+    /// review once sent), so a newer archive never loses the task.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        assignee = try container.decodeIfPresent(AgentRef.self, forKey: .assignee)
+        sentAt = try container.decodeIfPresent(Date.self, forKey: .sentAt)
+        let raw = try container.decodeIfPresent(String.self, forKey: .status)
+        status = raw.flatMap(BackgroundStatus.init(rawValue:)) ?? (sentAt == nil ? .waiting : .review)
+        summary = try container.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        link = try container.decodeIfPresent(String.self, forKey: .link)
+    }
+}
+
+// MARK: - Goal
+
+/// An outcome bigger than one task. Its tasks are the session-sized steps
+/// toward it; the goal itself is finished by hand.
+struct Goal: Codable, Identifiable, Equatable, Sendable {
+    var id: UUID = UUID()
+    var title: String
+    /// What finishing the goal looks like.
+    var doneWhen: String = ""
+    /// 1 = high, 2 = medium, 3 = low, as for tasks.
+    var priority: Int = 2
+    var createdDate: Date = Date()
+    /// Set when the goal is finished; finished goals leave the panel.
+    var doneAt: Date?
 }
 
 // MARK: - Preset
@@ -339,6 +445,8 @@ struct Settings: Codable, Equatable, Sendable {
     var unmanagedBrowsers: [String] = []
     /// How the day's open tasks are ordered.
     var taskSort: TaskSort = .manual
+    /// Starting a focus session sends every ready background task to its agent.
+    var startBackgroundTasksWithFocus: Bool = true
 
     static let `default` = Settings()
 
@@ -354,7 +462,7 @@ struct Settings: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case workSeconds, breakSeconds, longBreakSeconds, sessionsBeforeLongBreak, autoStartNextTask, strictMode, defaultMode, soundOn, toggleHotKey, newTaskHotKey, startPauseHotKey, pickerHotKey, pickWindowHotKey, showCountdownWindow, countdownStyle, unmanagedBrowsers, taskSort, onboardingDone
+        case workSeconds, breakSeconds, longBreakSeconds, sessionsBeforeLongBreak, autoStartNextTask, strictMode, defaultMode, soundOn, toggleHotKey, newTaskHotKey, startPauseHotKey, pickerHotKey, pickWindowHotKey, showCountdownWindow, countdownStyle, unmanagedBrowsers, taskSort, onboardingDone, startBackgroundTasksWithFocus
     }
 }
 
@@ -382,6 +490,7 @@ extension Settings {
         countdownStyle = try container.decodeIfPresent(CountdownStyle.self, forKey: .countdownStyle) ?? base.countdownStyle
         unmanagedBrowsers = try container.decodeIfPresent([String].self, forKey: .unmanagedBrowsers) ?? base.unmanagedBrowsers
         taskSort = try container.decodeIfPresent(TaskSort.self, forKey: .taskSort) ?? base.taskSort
+        startBackgroundTasksWithFocus = try container.decodeIfPresent(Bool.self, forKey: .startBackgroundTasksWithFocus) ?? base.startBackgroundTasksWithFocus
         // Existing archives predate onboarding; only a fresh install sees it.
         onboardingDone = try container.decodeIfPresent(Bool.self, forKey: .onboardingDone) ?? true
     }
@@ -425,7 +534,6 @@ struct Archive: Codable, Sendable {
     var todayCount: Int
     /// Day key `todayCount` refers to.
     var countDay: String
-    var lastUsedPresetID: UUID?
     /// Built-in presets the user deleted; they are not re-seeded on launch.
     var removedBuiltinNames: [String] = []
     /// Plants of the sessions that ended on `countDay`, in order.
@@ -436,11 +544,12 @@ struct Archive: Codable, Sendable {
     /// Sessions finished in a row on `countDay` since the last long break.
     /// Kept outside `session`: the row lasts through idle time between tasks.
     var sessionsInARow: Int = 0
+    var goals: [Goal] = []
 
     static let currentVersion = 1
 
     enum CodingKeys: String, CodingKey {
-        case version, tasks, presets, settings, todayCount, countDay, lastUsedPresetID, removedBuiltinNames, garden, session, sessionsInARow
+        case version, tasks, presets, settings, todayCount, countDay, removedBuiltinNames, garden, session, sessionsInARow, goals
     }
 }
 
@@ -471,12 +580,12 @@ extension Archive {
         settings = try container.decode(Settings.self, forKey: .settings)
         todayCount = try container.decode(Int.self, forKey: .todayCount)
         countDay = try container.decode(String.self, forKey: .countDay)
-        lastUsedPresetID = try container.decodeIfPresent(UUID.self, forKey: .lastUsedPresetID)
         removedBuiltinNames = try container.decodeIfPresent([String].self, forKey: .removedBuiltinNames) ?? []
         garden = try container.decodeIfPresent([GrowthRecord].self, forKey: .garden) ?? []
         // A session that no longer reads is dropped, never the whole archive.
         session = (try? container.decodeIfPresent(SessionSnapshot.self, forKey: .session)) ?? nil
         sessionsInARow = try container.decodeIfPresent(Int.self, forKey: .sessionsInARow) ?? 0
+        goals = try container.decodeIfPresent([Goal].self, forKey: .goals) ?? []
     }
 }
 

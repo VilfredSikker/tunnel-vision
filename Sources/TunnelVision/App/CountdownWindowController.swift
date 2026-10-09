@@ -4,19 +4,31 @@ import SwiftUI
 /// Small always-on-top countdown shown while a session or break runs, for
 /// when the menu bar is out of sight (full-screen apps, hidden status
 /// items). Non-activating, joins every Space, draggable, remembers where it
-/// was put.
+/// was put. A prompt from a background agent shows under the clock, and the
+/// panel grows to fit it and shrinks back once it is answered.
 @MainActor
 final class CountdownWindowController {
-    private static let originKey = "CountdownWindow.origin"
+    /// Where the panel's top-left corner was dragged to. The panel grows
+    /// down from there, so a prompt never moves the clock.
+    private static let topLeftKey = "CountdownWindow.topLeft"
+    /// The bottom-left corner, as earlier builds stored it.
+    private static let legacyOriginKey = "CountdownWindow.origin"
 
     private let model: AppState
     private var panel: NSPanel?
     private var moveObserver: NSObjectProtocol?
     /// The style the panel was sized for; a change rebuilds it.
     private var builtStyle: CountdownStyle?
+    /// What the HUD reports about its own layout.
+    private let layout = HUDLayout()
+    /// The last frame set here; a move to any other frame is the user's drag.
+    private var placedFrame: NSRect?
 
     init(model: AppState) {
         self.model = model
+        layout.onSize = { [weak self] size in
+            self?.place(size: size)
+        }
         observe()
         refresh()
     }
@@ -70,9 +82,13 @@ final class CountdownWindowController {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = true
+        // Answering a prompt from the bar must not pull focus away from
+        // the app the user works in.
+        panel.becomesKeyOnlyIfNeeded = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
-        let hosting = PassthroughHostingView(rootView: CountdownHUDView(model: model))
+        let hosting = HUDHostingView(rootView: CountdownHUDView(model: model, layout: layout))
+        hosting.layout = layout
         hosting.translatesAutoresizingMaskIntoConstraints = false
         let dragSurface = DragSurfaceView()
         dragSurface.addSubview(hosting)
@@ -83,10 +99,13 @@ final class CountdownWindowController {
             hosting.bottomAnchor.constraint(equalTo: dragSurface.bottomAnchor),
         ])
         panel.contentView = dragSurface
+        self.panel = panel
 
         let size = hosting.fittingSize
-        panel.setContentSize(size)
-        panel.setFrameOrigin(savedOrigin(for: size) ?? defaultOrigin(for: size))
+        if savedTopLeft(for: size) == nil, let legacy = legacyTopLeft(for: size) {
+            UserDefaults.standard.set(NSStringFromPoint(legacy), forKey: Self.topLeftKey)
+        }
+        place(size: size)
         builtStyle = model.settings.countdownStyle
 
         moveObserver = NotificationCenter.default.addObserver(
@@ -95,43 +114,91 @@ final class CountdownWindowController {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.rememberOrigin()
+                self?.rememberTopLeft()
             }
         }
-        self.panel = panel
         return panel
     }
 
     // MARK: Placement
 
+    /// Puts the panel at its remembered top-left corner at `size`, pulled
+    /// inside the screen where growing would spill over its edge.
+    private func place(size: NSSize) {
+        guard let panel, size.width > 0, size.height > 0 else { return }
+        let anchor = savedTopLeft(for: size) ?? defaultTopLeft(for: size)
+        var frame = NSRect(x: anchor.x, y: anchor.y - size.height, width: size.width, height: size.height)
+        let screen = NSScreen.screens.first { $0.visibleFrame.contains(anchor) } ?? NSScreen.main ?? NSScreen.screens.first
+        if let visible = screen?.visibleFrame {
+            frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+        }
+        guard frame != panel.frame else { return }
+        placedFrame = frame
+        panel.setFrame(frame, display: true)
+    }
+
     /// Top-right corner of the main screen, under the menu bar.
-    private func defaultOrigin(for size: NSSize) -> NSPoint {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
+    private func defaultTopLeft(for size: NSSize) -> NSPoint {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return NSPoint(x: 0, y: size.height) }
         let visible = screen.visibleFrame
-        return NSPoint(x: visible.maxX - size.width - 16, y: visible.maxY - size.height - 16)
+        return NSPoint(x: visible.maxX - size.width - 16, y: visible.maxY - 16)
     }
 
     /// The last dragged position, if it still lands on a connected screen.
-    private func savedOrigin(for size: NSSize) -> NSPoint? {
-        guard let stored = UserDefaults.standard.string(forKey: Self.originKey) else { return nil }
-        let origin = NSPointFromString(stored)
-        let frame = NSRect(origin: origin, size: size)
-        let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
-        return onScreen ? origin : nil
+    private func savedTopLeft(for size: NSSize) -> NSPoint? {
+        guard let stored = UserDefaults.standard.string(forKey: Self.topLeftKey) else { return nil }
+        let topLeft = NSPointFromString(stored)
+        return onScreen(NSRect(x: topLeft.x, y: topLeft.y - size.height, width: size.width, height: size.height)) ? topLeft : nil
     }
 
-    private func rememberOrigin() {
-        guard let panel else { return }
-        UserDefaults.standard.set(NSStringFromPoint(panel.frame.origin), forKey: Self.originKey)
+    private func legacyTopLeft(for size: NSSize) -> NSPoint? {
+        guard let stored = UserDefaults.standard.string(forKey: Self.legacyOriginKey) else { return nil }
+        let origin = NSPointFromString(stored)
+        return onScreen(NSRect(origin: origin, size: size)) ? NSPoint(x: origin.x, y: origin.y + size.height) : nil
+    }
+
+    private func onScreen(_ frame: NSRect) -> Bool {
+        NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
+    }
+
+    /// Only the user's drags count; the panel's own resizing does not move
+    /// where it lives.
+    private func rememberTopLeft() {
+        guard let panel, panel.frame != placedFrame else { return }
+        placedFrame = panel.frame
+        UserDefaults.standard.set(NSStringFromPoint(NSPoint(x: panel.frame.minX, y: panel.frame.maxY)), forKey: Self.topLeftKey)
     }
 }
 
 // MARK: - Views
 
-/// Lets clicks fall through to the drag surface beneath: the HUD has no
-/// controls, and a click anywhere on it should move it.
-private final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+/// What the HUD tells its host: the area that takes clicks itself (the
+/// prompt's buttons), and its size whenever that changes.
+@MainActor
+final class HUDLayout {
+    /// In the hosting view's top-left coordinates.
+    var interactiveRect: CGRect = .zero
+    var onSize: ((CGSize) -> Void)?
+}
+
+/// Clicks fall through to the drag surface beneath, so a click anywhere
+/// moves the HUD, except on the prompt, whose buttons answer on the first
+/// click without the panel taking focus.
+private final class HUDHostingView<Content: View>: NSHostingView<Content> {
+    var layout: HUDLayout?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let layout, !layout.interactiveRect.isEmpty else { return nil }
+        let local = convert(point, from: superview)
+        let fromTop = CGPoint(x: local.x, y: isFlipped ? local.y : bounds.height - local.y)
+        guard layout.interactiveRect.contains(fromTop) else { return nil }
+        return super.hitTest(point)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
 }
 
 private final class DragSurfaceView: NSView {
@@ -140,12 +207,62 @@ private final class DragSurfaceView: NSView {
     }
 }
 
+private struct HUDSizeKey: PreferenceKey {
+    static let defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        value = nextValue()
+    }
+}
+
+private struct HUDInteractiveKey: PreferenceKey {
+    static let defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if !next.isEmpty { value = next }
+    }
+}
+
 struct CountdownHUDView: View {
     let model: AppState
+    /// Where the host learns the HUD's size and clickable area.
+    var layout: HUDLayout?
 
     private static let gardenHeight: CGFloat = 64
 
+    /// The oldest prompt waiting (or just answered), and how many more wait.
+    private var shownApproval: (approval: PendingApproval, more: Int)? {
+        BackgroundPresentation.barApproval(ApprovalReplies.shared.visible(model.background.approvals))
+    }
+
     var body: some View {
+        let shown = shownApproval
+        VStack(alignment: .leading, spacing: 6) {
+            clock
+            if let shown {
+                Divider()
+                ApprovalView(model: model, approval: shown.approval, style: .compact, more: shown.more)
+                    .background(GeometryReader { proxy in
+                        Color.clear.preference(key: HUDInteractiveKey.self, value: proxy.frame(in: .global))
+                    })
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(width: shown == nil ? 176 : 300)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .fixedSize()
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: HUDSizeKey.self, value: proxy.size)
+        })
+        .onPreferenceChange(HUDSizeKey.self) { size in
+            MainActor.assumeIsolated { layout?.onSize?(size) }
+        }
+        .onPreferenceChange(HUDInteractiveKey.self) { rect in
+            MainActor.assumeIsolated { layout?.interactiveRect = rect }
+        }
+    }
+
+    private var clock: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             VStack(spacing: 4) {
                 if model.settings.countdownStyle == .garden {
@@ -168,11 +285,7 @@ struct CountdownHUDView: View {
                     Spacer(minLength: 0)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .frame(width: 176)
         }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
     }
 
     /// The session's plant, growing with the timer and standing still while
@@ -181,9 +294,10 @@ struct CountdownHUDView: View {
     private var garden: some View {
         Group {
             if let shown = gardenPlant {
+                // No animation on the once-per-second step: a session moves
+                // the plant by a fraction too small to see, and animating it
+                // kept the panel redrawing at the display's frame rate.
                 GrowthSceneView(plan: shown.plan, progress: shown.progress)
-                    // Smooth the once-per-second step under the periodic re-evaluation.
-                    .animation(.linear(duration: 0.9), value: shown.progress)
             } else {
                 Color.clear
             }

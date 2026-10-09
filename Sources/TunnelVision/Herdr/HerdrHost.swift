@@ -26,6 +26,16 @@ enum HerdrHost {
         return nil
     }
 
+    /// Brings the terminal hosting herdr to the front. False when no
+    /// terminal could be found.
+    @MainActor
+    @discardableResult
+    static func activateTerminal() -> Bool {
+        guard let bundle = terminalBundleID(),
+              let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { return false }
+        return app.activate()
+    }
+
     // MARK: libproc
 
     private static func allPIDs() -> [pid_t] {

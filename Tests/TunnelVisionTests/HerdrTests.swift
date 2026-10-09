@@ -91,8 +91,54 @@ final class FakeHerdrClient: HerdrControlling {
         notices.append(title)
     }
 
-    func events() -> AsyncStream<HerdrEvent> {
-        AsyncStream { $0.finish() }
+    // Background agents
+    var agentsResult: [HerdrAgent] = []
+    var agentsError: Error?
+    var agentsCalls = 0
+    var promptError: Error?
+    /// Every prompt submitted, as (pane, text).
+    var prompts: [(pane: String, text: String)] = []
+    /// Screens `read` returns in turn; the last one repeats.
+    var screens: [String] = []
+    var reads = 0
+    var sentKeys: [(pane: String, keys: [String])] = []
+
+    func agents() async throws -> [HerdrAgent] {
+        agentsCalls += 1
+        if let agentsError { throw agentsError }
+        return agentsResult
+    }
+
+    func prompt(target paneID: String, text: String) async throws {
+        if let promptError { throw promptError }
+        prompts.append((paneID, text))
+    }
+
+    func read(target paneID: String) async throws -> String {
+        defer { reads += 1 }
+        guard !screens.isEmpty else { throw HerdrError.malformed }
+        return screens[min(reads, screens.count - 1)]
+    }
+
+    func sendKeys(target paneID: String, keys: [String]) async throws {
+        sentKeys.append((paneID, keys))
+    }
+
+    /// Every pane brought forward, in order.
+    var focusedPanes: [String] = []
+    var focusAgentError: Error?
+
+    func focusAgent(target paneID: String) async throws {
+        if let focusAgentError { throw focusAgentError }
+        focusedPanes.append(paneID)
+    }
+
+    /// The kinds of every subscription opened, in order.
+    var subscriptions: [[String]] = []
+
+    func events(kinds: [String]) -> AsyncStream<HerdrEvent> {
+        subscriptions.append(kinds)
+        return AsyncStream { $0.finish() }
     }
 }
 
