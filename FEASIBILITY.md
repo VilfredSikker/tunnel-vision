@@ -217,8 +217,8 @@ Two small additions make upfront configuration mostly unnecessary:
   optional set of URLs to open when the task starts.
 - Built-ins to ship: Coding (editor, terminal, browser limited to docs and the repo),
   Writing (Obsidian only), Comms (Slack, Mail), Reading (browser, one URL).
-- Tasks reference a preset and may override rules. A new task inherits the last used
-  preset so the common path is one click.
+- Tasks reference a preset and may override rules. A new task starts with no
+  preset; one is picked when the work needs a lock.
 - "Save current as preset" snapshots the picker state. Presets live as a JSON file in
   Application Support so they can be edited or versioned by hand.
 

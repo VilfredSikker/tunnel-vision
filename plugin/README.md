@@ -9,6 +9,8 @@ Skills that plan, review and fill your [Tunnel Vision](https://github.com/Vilfre
 | `suggest-tasks` | "what should I work on?" | Turns work from the conversation, the current repo, pull requests and connected tools into focus tasks, filed under your goals. |
 | `break-down` | "break this down", "what's next on the launch goal?" | Turns a big piece of work into a goal and its next one to three session-sized steps, replacing the big task if there is one. |
 | `end-of-day` | "wrap up my day" | Checks off what finished, refills each goal's next steps, defers what won't fit tomorrow, and offers a short log of the day. |
+| `background-task` | "hand this off", `/tv bg` | Turns the work in the conversation into a background task for this agent's own herdr pane. It starts by itself with your next focus session. |
+| `capture-task` | "make this a task", `/tv task` | Turns the work in the conversation into a focus task on your list. |
 
 Every task is one focus session with a `done_when` you can check when the timer ends ("PR opened", "5 questions answered"). Work bigger than one session becomes either a task with several `sessions` (steady work such as reading or reviewing) or a goal whose next one to three steps, its runway, sit on the list and get refilled as they finish. The shared rules live in [`skills/TASK-SHAPE.md`](skills/TASK-SHAPE.md).
 
