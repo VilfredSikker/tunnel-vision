@@ -77,7 +77,7 @@ struct MainPanel: View {
             Divider()
             footer
         }
-        .frame(width: 340)
+        .frame(width: 440)
         .background(.regularMaterial)
         .sheet(item: $editorMode) { mode in
             TaskEditorView(model: model, task: mode.task)
@@ -130,11 +130,16 @@ struct MainPanel: View {
         var done = model.doneTasks(on: day)
         // Today, background tasks leave the lists for their own section.
         var background: [TaskItem] = []
+        var backgroundDone: [TaskItem] = []
         if isToday {
-            (open, done, background) = BackgroundPresentation.split(open: open, done: done)
+            (open, done, background, backgroundDone) = BackgroundPresentation.split(open: open, done: done)
         }
-        let showsBackground = isToday
-            && (!background.isEmpty || !ApprovalReplies.shared.visible(model.background.approvals).isEmpty)
+        let showsBackground = BackgroundPresentation.showsSection(
+            isToday: isToday,
+            background: background,
+            backgroundDone: backgroundDone,
+            hasVisibleApprovals: !ApprovalReplies.shared.visible(model.background.approvals).isEmpty
+        )
         return VStack(spacing: 6) {
             HStack {
                 dayButton
@@ -228,7 +233,7 @@ struct MainPanel: View {
             // never scrolled out of sight.
             if showsBackground {
                 Divider().padding(.horizontal, 14)
-                BackgroundSection(model: model, tasks: background, onEdit: { editorMode = .edit($0) })
+                BackgroundSection(model: model, tasks: background, done: backgroundDone, onEdit: { editorMode = .edit($0) })
             }
 
             Button {
@@ -334,7 +339,7 @@ struct MainPanel: View {
             expanded: $doneExpanded,
             expandable: done.count > 1
         )
-        rows(doneExpanded ? done : Array(done.prefix(1)))
+        rows(BackgroundPresentation.foldedDone(done, expanded: doneExpanded))
     }
 
     @ViewBuilder
@@ -346,35 +351,7 @@ struct MainPanel: View {
     }
 
     private func groupHeader(title: String, count: Int, expanded: Binding<Bool>, expandable: Bool) -> some View {
-        Button {
-            guard expandable else { return }
-            withAnimation(.easeInOut(duration: 0.15)) {
-                expanded.wrappedValue.toggle()
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text("\(title) · \(count)")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.secondary)
-                if expandable {
-                    Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    if !expanded.wrappedValue {
-                        Text("show all")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(expandable ? (expanded.wrappedValue ? "Show only the latest" : "Show all \(count)") : "")
+        GroupHeader(title: title, count: count, expanded: expanded, expandable: expandable)
     }
 
     // MARK: Footer

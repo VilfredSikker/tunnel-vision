@@ -172,7 +172,7 @@ final class StatusItemController: NSObject {
     private func resizePopoverToFit() {
         guard let view = popover.contentViewController?.view else { return }
         let fitting = view.fittingSize
-        let width = min(max(fitting.width, 300), 380)
+        let width = min(max(fitting.width, 300), 440)
         let height = min(max(fitting.height, 220), 800)
         popover.contentSize = NSSize(width: width, height: height)
     }

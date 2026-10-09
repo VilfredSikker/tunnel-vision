@@ -656,7 +656,21 @@ final class BackgroundPresentationTests: XCTestCase {
         let split = BackgroundPresentation.split(open: [agentOpen, plain], done: [agentDone, plainDone])
         XCTAssertEqual(split.open.map(\.title), ["Plain"])
         XCTAssertEqual(split.done.map(\.title), ["Plain done"])
-        XCTAssertEqual(split.background.map(\.title), ["Agent open", "Agent done"], "open ones first, then today's checked off")
+        XCTAssertEqual(split.background.map(\.title), ["Agent open"])
+        XCTAssertEqual(split.backgroundDone.map(\.title), ["Agent done"], "checked off today, apart from the open ones")
+    }
+
+    func testTheBackgroundSectionShowsForDoneTasksAndFoldsToTheLatest() {
+        let open = task("Open", background: BackgroundInfo(assignee: assignee))
+        let done = [task("New", background: BackgroundInfo(assignee: assignee)), task("Old", background: BackgroundInfo(assignee: assignee))]
+        XCTAssertTrue(BackgroundPresentation.showsSection(isToday: true, background: [], backgroundDone: done, hasVisibleApprovals: false), "only done tasks still show the section")
+        XCTAssertTrue(BackgroundPresentation.showsSection(isToday: true, background: [open], backgroundDone: [], hasVisibleApprovals: false))
+        XCTAssertTrue(BackgroundPresentation.showsSection(isToday: true, background: [], backgroundDone: [], hasVisibleApprovals: true))
+        XCTAssertFalse(BackgroundPresentation.showsSection(isToday: true, background: [], backgroundDone: [], hasVisibleApprovals: false))
+        XCTAssertFalse(BackgroundPresentation.showsSection(isToday: false, background: [open], backgroundDone: done, hasVisibleApprovals: true), "other days keep the plain list")
+        XCTAssertEqual(BackgroundPresentation.foldedDone(done, expanded: false).map(\.title), ["New"])
+        XCTAssertEqual(BackgroundPresentation.foldedDone(done, expanded: true).map(\.title), ["New", "Old"])
+        XCTAssertEqual(BackgroundPresentation.foldedDone([], expanded: false).count, 0)
     }
 
     func testTheRowNamesTheAgentOrWhyItWaits() {
@@ -953,5 +967,9 @@ final class BackgroundControlTests: XCTestCase {
         let properties = addTask?.inputSchema["properties"] as? [String: Any]
         XCTAssertNotNil(properties?["background"])
         XCTAssertNotNil(properties?["assign_to"])
+        for tool in ["tunnelvision_add_task", "tunnelvision_update_task"] {
+            let schema = ControlTools.all.first { $0.name == tool }?.inputSchema["properties"] as? [String: Any]
+            XCTAssertEqual((schema?["urls_to_open"] as? [String: Any])?["type"] as? String, "array", "\(tool) offers urls_to_open")
+        }
     }
 }

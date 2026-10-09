@@ -6,24 +6,32 @@ import SwiftUI
 struct BackgroundSection: View {
     let model: AppState
     let tasks: [TaskItem]
+    /// Checked off today: folded under the open ones like the focus list.
+    let done: [TaskItem]
     let onEdit: (TaskItem) -> Void
+
+    @State private var doneExpanded = false
 
     /// Approvals whose task is not among the rows (deleted meanwhile, or
     /// not on today's list): shown on their own at the top.
     private var unattached: [PendingApproval] {
-        let ids = Set(tasks.map(\.id))
+        let ids = Set((tasks + shownDone).map(\.id))
         return ApprovalReplies.shared.visible(model.background.approvals).filter { !ids.contains($0.taskID) }
+    }
+
+    private var shownDone: [TaskItem] {
+        BackgroundPresentation.foldedDone(done, expanded: doneExpanded)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Background · \(tasks.count)")
+            Text("Background · \(tasks.count + done.count)")
                 .font(.caption)
                 .fontWeight(.semibold)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 4)
-            if !model.background.isHerdrReachable {
+            if !tasks.isEmpty, !model.background.isHerdrReachable {
                 Text("herdr isn't running — background tasks wait")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
@@ -41,9 +49,20 @@ struct BackgroundSection: View {
                     Divider().padding(.leading, 42)
                 }
             }
+            if !done.isEmpty {
+                GroupHeader(title: "Done", count: done.count, expanded: $doneExpanded, expandable: done.count > 1)
+                ForEach(shownDone) { task in
+                    BackgroundRowView(model: model, task: task, onEdit: { onEdit(task) })
+                    if task.id != shownDone.last?.id {
+                        Divider().padding(.leading, 42)
+                    }
+                }
+            }
         }
         .task {
             // Fresh labels and statuses whenever the panel shows the section.
+            // Nothing open means nothing to ask herdr about.
+            guard !tasks.isEmpty else { return }
             await model.background.refreshAgents()
         }
     }

@@ -32,15 +32,26 @@ enum BackgroundPresentation {
 
     // MARK: Section
 
-    /// Today's lists with background tasks taken out, and the Background
-    /// section's tasks: open ones first, in list order, then those checked
-    /// off today.
-    static func split(open: [TaskItem], done: [TaskItem]) -> (open: [TaskItem], done: [TaskItem], background: [TaskItem]) {
+    /// Today's lists with background tasks taken out: the Background section's
+    /// open tasks in list order, and its own done list (checked off today).
+    static func split(open: [TaskItem], done: [TaskItem]) -> (open: [TaskItem], done: [TaskItem], background: [TaskItem], backgroundDone: [TaskItem]) {
         (
             open.filter { !$0.isBackground },
             done.filter { !$0.isBackground },
-            open.filter(\.isBackground) + done.filter(\.isBackground)
+            open.filter(\.isBackground),
+            done.filter(\.isBackground)
         )
+    }
+
+    /// Today the section shows for any background task, open or done, and for
+    /// a prompt waiting on an answer.
+    static func showsSection(isToday: Bool, background: [TaskItem], backgroundDone: [TaskItem], hasVisibleApprovals: Bool) -> Bool {
+        isToday && (!background.isEmpty || !backgroundDone.isEmpty || hasVisibleApprovals)
+    }
+
+    /// A Done group folds to its latest task until expanded.
+    static func foldedDone(_ done: [TaskItem], expanded: Bool) -> [TaskItem] {
+        expanded ? done : Array(done.prefix(1))
     }
 
     /// The workspace a task's agent lives in: the live herdr label, else
