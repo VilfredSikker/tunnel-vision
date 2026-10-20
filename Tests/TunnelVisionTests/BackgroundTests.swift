@@ -189,6 +189,13 @@ final class BackgroundModelTests: XCTestCase {
         XCTAssertTrue(brief.contains("summary"))
         XCTAssertTrue(brief.contains("link"))
     }
+
+    func testTheBriefCarriesTheDescriptionAndChecklist() {
+        let task = TaskItem(title: "Fix the flaky test", durationSeconds: 60, doneWhen: "CI green",
+                            notes: "Only fails on Linux", checklist: [ChecklistItem(text: "Reproduce", done: true), ChecklistItem(text: "Fix")])
+        let brief = BackgroundAgents.brief(for: task)
+        XCTAssertTrue(brief.hasPrefix("Fix the flaky test\n\nOnly fails on Linux\n\nChecklist:\n- [x] Reproduce\n- [ ] Fix\n\nDone when: CI green"))
+    }
 }
 
 // MARK: - Dispatch, status, approvals

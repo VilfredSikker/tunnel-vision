@@ -903,6 +903,29 @@ final class AppStateTests: XCTestCase {
         XCTAssertFalse(nextDay.tasks[0].isDone(on: nextDay.todayKey), "done marks are per-day")
     }
 
+    func testRepeatingTaskKeepsChecklistTicksTheNextDay() {
+        let state = makeState()
+        let task = state.addTask(
+            title: "Morning routine", durationSeconds: 15 * 60, presetID: nil, overrides: [],
+            repeatDaily: true, notes: "  Before standup  ",
+            checklist: [ChecklistItem(text: "Inbox"), ChecklistItem(text: " "), ChecklistItem(text: "Calendar")]
+        )
+        XCTAssertEqual(task.notes, "Before standup", "trimmed")
+        XCTAssertEqual(task.checklist.map(\.text), ["Inbox", "Calendar"], "blank items dropped")
+
+        state.setTaskDone(id: task.id, done: true)
+        // Last, so the tick has to save on its own.
+        state.setChecklistItem(taskID: task.id, itemID: task.checklist[0].id, done: true)
+
+        now = Calendar.current.date(byAdding: .day, value: 1, to: now)!
+        let nextDay = makeState()
+        let carried = nextDay.tasks[0]
+        XCTAssertTrue(nextDay.isOpen(carried, on: nextDay.todayKey), "a repeating task is back on the list")
+        XCTAssertFalse(carried.isDone(on: nextDay.todayKey))
+        XCTAssertEqual(carried.notes, "Before standup")
+        XCTAssertEqual(carried.checklist.map(\.done), [true, false], "ticks carry over")
+    }
+
     func testCheckoffDuringBreakRefreshesNextTask() {
         let state = makeState()
         let (a, b) = seedTwoTasks(in: state)

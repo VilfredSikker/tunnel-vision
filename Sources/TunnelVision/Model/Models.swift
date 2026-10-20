@@ -164,6 +164,11 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
     /// URLs opened when the task starts, one per entry; scheme-less entries
     /// are https. Opened together with the preset's own.
     var urlsToOpen: [String]
+    /// Free-text description, shown on hover and in the editor.
+    var notes: String
+    /// Ticks live on the task, not per day, so a repeating task shows the
+    /// same ticked items the next day.
+    var checklist: [ChecklistItem]
 
     init(
         id: UUID = UUID(),
@@ -180,7 +185,9 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
         doneWhen: String = "",
         goalID: UUID? = nil,
         background: BackgroundInfo? = nil,
-        urlsToOpen: [String] = []
+        urlsToOpen: [String] = [],
+        notes: String = "",
+        checklist: [ChecklistItem] = []
     ) {
         self.id = id
         self.title = title
@@ -197,6 +204,8 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
         self.goalID = goalID
         self.background = background
         self.urlsToOpen = urlsToOpen
+        self.notes = notes
+        self.checklist = checklist
     }
 
     var isBackground: Bool { background != nil }
@@ -253,19 +262,21 @@ struct TaskItem: Codable, Identifiable, Equatable, Sendable {
             doneWhen: doneWhen,
             goalID: goalID,
             background: background.map { BackgroundInfo(assignee: $0.assignee) },
-            urlsToOpen: urlsToOpen
+            urlsToOpen: urlsToOpen,
+            notes: notes,
+            checklist: checklist
         )
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, durationSeconds, presetID, overrides, doneDays, doneAt, repeatDaily, priority, createdDate, seriesID, doneWhen, goalID, background, urlsToOpen
+        case id, title, durationSeconds, presetID, overrides, doneDays, doneAt, repeatDaily, priority, createdDate, seriesID, doneWhen, goalID, background, urlsToOpen, notes, checklist
     }
 }
 
 extension TaskItem {
     /// `doneAt`, `repeatDaily`, `priority`, `createdDate`, `seriesID`,
-    /// `doneWhen`, `goalID`, `background` and `urlsToOpen` arrived after v1; older archives
-    /// keep decoding without them.
+    /// `doneWhen`, `goalID`, `background`, `urlsToOpen`, `notes` and
+    /// `checklist` arrived after v1; older archives keep decoding without them.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
@@ -283,6 +294,29 @@ extension TaskItem {
         goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
         background = try container.decodeIfPresent(BackgroundInfo.self, forKey: .background)
         urlsToOpen = try container.decodeIfPresent([String].self, forKey: .urlsToOpen) ?? []
+        notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        checklist = try container.decodeIfPresent([ChecklistItem].self, forKey: .checklist) ?? []
+    }
+}
+
+/// One line of a task's checklist.
+struct ChecklistItem: Codable, Identifiable, Equatable, Sendable {
+    var id: UUID = UUID()
+    var text: String
+    var done: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case id, text, done
+    }
+}
+
+extension ChecklistItem {
+    /// Only `text` is required, so a hand-edited archive still loads.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        text = try container.decode(String.self, forKey: .text)
+        done = try container.decodeIfPresent(Bool.self, forKey: .done) ?? false
     }
 }
 

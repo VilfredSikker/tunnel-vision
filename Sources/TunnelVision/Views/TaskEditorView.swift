@@ -23,6 +23,9 @@ struct TaskEditorView: View {
     @State private var doneWhen: String
     @State private var assignee: AgentRef?
     @State private var urlsText: String
+    @State private var notes: String
+    @State private var checklist: [ChecklistItem]
+    @State private var newItem = ""
 
     init(model: AppState, task: TaskItem?) {
         self.model = model
@@ -38,6 +41,8 @@ struct TaskEditorView: View {
         _doneWhen = State(initialValue: task?.doneWhen ?? "")
         _assignee = State(initialValue: task?.background?.assignee)
         _urlsText = State(initialValue: (task?.urlsToOpen ?? []).joined(separator: "\n"))
+        _notes = State(initialValue: task?.notes ?? "")
+        _checklist = State(initialValue: task?.checklist ?? [])
     }
 
     private var isEditing: Bool { task != nil }
@@ -68,6 +73,9 @@ struct TaskEditorView: View {
             TextField("What are you working on?", text: $title)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(save)
+
+            descriptionSection
+            checklistSection
 
             Toggle(isOn: $isBackground) {
                 VStack(alignment: .leading, spacing: 1) {
@@ -134,8 +142,75 @@ struct TaskEditorView: View {
                     .disabled(!canSave)
             }
         }
+        // Return makes a new line in the description, so Cmd-Return saves
+        // from anywhere in the form.
+        .background {
+            Button("") { save() }
+                .keyboardShortcut(.return, modifiers: .command)
+                .opacity(0)
+                .allowsHitTesting(false)
+        }
         .padding(18)
         .frame(width: 360)
+    }
+
+    // MARK: Description and checklist
+
+    private var descriptionSection: some View {
+        TextEditor(text: $notes)
+            .font(.callout)
+            .frame(height: 54)
+            .overlay(alignment: .topLeading) {
+                if notes.isEmpty {
+                    Text("Description (optional)")
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 5)
+                        .allowsHitTesting(false)
+                }
+            }
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.3)))
+    }
+
+    /// Ticks made here save with the task; on a repeating task they stay
+    /// ticked the next day.
+    private var checklistSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach($checklist) { $item in
+                HStack(spacing: 6) {
+                    Toggle("", isOn: $item.done)
+                        .toggleStyle(.checkbox)
+                        .labelsHidden()
+                    TextField("Item", text: $item.text)
+                        .textFieldStyle(.plain)
+                        .strikethrough(item.done, color: .secondary)
+                    Button {
+                        checklist.removeAll { $0.id == item.id }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove item")
+                }
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "plus")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14)
+                TextField("Add checklist item", text: $newItem)
+                    .textFieldStyle(.plain)
+                    .onSubmit(addItem)
+            }
+        }
+    }
+
+    private func addItem() {
+        let text = newItem.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        checklist.append(ChecklistItem(text: text))
+        newItem = ""
     }
 
     // MARK: Focus task
@@ -405,6 +480,8 @@ struct TaskEditorView: View {
     private func save() {
         let trimmed = title.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
+        // An item still in the add field counts, as with Cmd-Return.
+        addItem()
         // The model keeps the run state of a task already out; the editor
         // only decides whether it is background and who it goes to.
         let urls = AppState.urlLines(urlsText)
@@ -422,6 +499,8 @@ struct TaskEditorView: View {
             updated.repeatDaily = repeatDaily
             updated.priority = priority
             updated.urlsToOpen = urls
+            updated.notes = notes
+            updated.checklist = checklist
             if isBackground {
                 updated.doneWhen = doneWhen
             }
@@ -437,7 +516,9 @@ struct TaskEditorView: View {
                 priority: priority,
                 doneWhen: isBackground ? doneWhen : "",
                 background: background,
-                urlsToOpen: urls
+                urlsToOpen: urls,
+                notes: notes,
+                checklist: checklist
             )
         }
         dismiss()

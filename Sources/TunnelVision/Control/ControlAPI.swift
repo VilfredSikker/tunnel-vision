@@ -51,11 +51,13 @@ final class ControlAPI {
             let priority = try priorityParam(params["priority"]) ?? 2
             let doneWhen = params["done_when"] as? String ?? ""
             let urls = params["urls_to_open"] as? [String] ?? []
+            let notes = params["description"] as? String ?? ""
+            let checklist = try checklistParam(params["checklist"]) ?? []
             let goalID = try goalParam(params["goal"])?.id
             // `assign_to` alone makes a background task too.
             let wantsBackground = params["background"] as? Bool ?? (params["assign_to"] is String)
             let background = wantsBackground ? BackgroundInfo(assignee: try assigneeParam(params)) : nil
-            let task = model.addTask(title: title, durationSeconds: TimeInterval(minutes * 60), presetID: presetID, overrides: rules, repeatDaily: repeatDaily, priority: priority, doneWhen: doneWhen, goalID: goalID, background: background, urlsToOpen: urls)
+            let task = model.addTask(title: title, durationSeconds: TimeInterval(minutes * 60), presetID: presetID, overrides: rules, repeatDaily: repeatDaily, priority: priority, doneWhen: doneWhen, goalID: goalID, background: background, urlsToOpen: urls, notes: notes, checklist: checklist)
             return ["task": taskJSON(task, day: model.todayKey)]
 
         case "tasks.update":
@@ -84,6 +86,12 @@ final class ControlAPI {
             }
             if let urls = params["urls_to_open"] as? [String] {
                 task.urlsToOpen = urls
+            }
+            if let notes = params["description"] as? String {
+                task.notes = notes
+            }
+            if let checklist = try checklistParam(params["checklist"], existing: task.checklist) {
+                task.checklist = checklist
             }
             if params.keys.contains("goal") {
                 task.goalID = try goalParam(params["goal"])?.id
@@ -471,6 +479,32 @@ final class ControlAPI {
         }
     }
 
+    /// Items are strings or `{text, done}` objects. An item matching an
+    /// existing one by id, or else by text, keeps that one's id and tick
+    /// unless `done` is given, so an update that rewrites the list doesn't
+    /// clear what was ticked.
+    private func checklistParam(_ raw: Any?, existing: [ChecklistItem] = []) throws -> [ChecklistItem]? {
+        guard let raw else { return nil }
+        guard let list = raw as? [Any] else { throw ControlError.invalidParams("checklist must be a list") }
+        return try list.map { entry in
+            let text: String
+            var done: Bool?
+            var id: UUID?
+            if let string = entry as? String {
+                text = string
+            } else if let object = entry as? [String: Any], let value = object["text"] as? String {
+                text = value
+                done = object["done"] as? Bool
+                id = (object["id"] as? String).flatMap(UUID.init(uuidString:))
+            } else {
+                throw ControlError.invalidParams("checklist items are strings or objects with text")
+            }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let match = existing.first { $0.id == id } ?? existing.first { $0.text == trimmed }
+            return ChecklistItem(id: match?.id ?? UUID(), text: trimmed, done: done ?? match?.done ?? false)
+        }
+    }
+
     // MARK: JSON
 
     private func stateJSON() -> [String: Any] {
@@ -528,6 +562,8 @@ final class ControlAPI {
             "sessions_done": model.sessionProgress(for: task, on: day).done,
             "done_when": task.doneWhen,
             "urls_to_open": task.urlsToOpen,
+            "description": task.notes,
+            "checklist": task.checklist.map(checklistItemJSON),
             "active": task.id == model.activeTaskID,
         ]
         if task.createdDate != .distantPast {
@@ -689,6 +725,10 @@ final class ControlAPI {
             "rules": preset.rules.map(ruleJSON),
             "urls_to_open": preset.urlsToOpen,
         ]
+    }
+
+    private func checklistItemJSON(_ item: ChecklistItem) -> [String: Any] {
+        ["id": item.id.uuidString, "text": item.text, "done": item.done]
     }
 
     private func ruleJSON(_ rule: Rule) -> [String: Any] {

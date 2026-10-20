@@ -291,6 +291,30 @@ final class ControlAPITests: XCTestCase {
         XCTAssertEqual(updated["done_when"] as? String, "Notes sent")
     }
 
+    func testDescriptionAndChecklistAddUpdateAndKeepTicks() throws {
+        let added = task(try call("tasks.add", [
+            "title": "Weekly review",
+            "description": "Inbox first",
+            "checklist": ["Inbox", ["text": "Calendar", "done": true]],
+        ]))
+        XCTAssertEqual(added["description"] as? String, "Inbox first")
+        let items = added["checklist"] as? [[String: Any]] ?? []
+        XCTAssertEqual(items.map { $0["text"] as? String }, ["Inbox", "Calendar"])
+        XCTAssertEqual(items.map { $0["done"] as? Bool }, [false, true])
+        let id = added["id"] as! String
+
+        // Rewriting the list keeps Calendar's tick and id; Inbox is ticked by id.
+        let inboxID = items[0]["id"] as! String
+        let updated = task(try call("tasks.update", [
+            "id": id,
+            "checklist": [["id": inboxID, "text": "Inbox", "done": true], "Calendar", "Notes"],
+        ]))
+        let after = updated["checklist"] as? [[String: Any]] ?? []
+        XCTAssertEqual(after.map { $0["done"] as? Bool }, [true, true, false])
+        XCTAssertEqual(after[1]["id"] as? String, items[1]["id"] as? String)
+        XCTAssertThrowsError(try call("tasks.update", ["id": id, "checklist": [42]]))
+    }
+
     func testDuplicateToolRoutesToTasksDuplicate() throws {
         let routed = try XCTUnwrap(ControlTools.route(tool: "tunnelvision_duplicate_task", arguments: ["id": "x"]))
         XCTAssertEqual(routed.method, "tasks.duplicate")

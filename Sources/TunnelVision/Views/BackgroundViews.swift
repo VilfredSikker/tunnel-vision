@@ -149,6 +149,7 @@ struct BackgroundRowView: View {
     }
 
     private var rowHelp: String {
+        let notes = task.notes.isEmpty ? nil : task.notes
         let doneWhen = task.doneWhen.isEmpty ? nil : "Done when: \(task.doneWhen)"
         let open: String? = switch BackgroundPresentation.rowClick(
             hasPane: info.assignee?.paneID != nil, phase: model.phase
@@ -157,7 +158,7 @@ struct BackgroundRowView: View {
         case .later: "Click opens the agent’s pane at the break"
         case .none: nil
         }
-        return [doneWhen, open].compactMap { $0 }.joined(separator: "\n")
+        return [notes, doneWhen, open].compactMap { $0 }.joined(separator: "\n")
     }
 
     private func openPaneFromRow() {

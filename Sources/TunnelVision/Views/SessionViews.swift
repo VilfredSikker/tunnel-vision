@@ -11,6 +11,9 @@ struct SessionHeader: View {
         VStack(spacing: 10) {
             ring
             taskLine
+            if let task = model.activeTask, !task.notes.isEmpty || !task.checklist.isEmpty {
+                taskDetails(task)
+            }
             controls
             extendRow
             if let task = model.activeTask {
@@ -91,6 +94,21 @@ struct SessionHeader: View {
                 .truncationMode(.tail)
             presetChip
         }
+    }
+
+    /// The running task's description and checklist, tickable mid-session.
+    private func taskDetails(_ task: TaskItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !task.notes.isEmpty {
+                Text(task.notes)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
+                    .help(task.notes)
+            }
+            ChecklistView(model: model, taskID: task.id)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var presetChip: some View {

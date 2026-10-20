@@ -131,8 +131,11 @@ struct TaskRowView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            .help(task.doneWhen.isEmpty ? "" : "Done when: \(task.doneWhen)")
+            .help(Self.hoverHelp(for: task, goal: model.goal(id: task.goalID)))
             Spacer(minLength: 4)
+            if !task.checklist.isEmpty {
+                ChecklistBadge(model: model, task: task)
+            }
             trailingAction
         }
         .padding(.horizontal, 14)
@@ -141,6 +144,25 @@ struct TaskRowView: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(isActive ? Theme.allowed.opacity(0.09) : .clear)
         )
+    }
+
+    /// The row truncates the title, so hovering shows it whole, with its
+    /// description, checklist, what finishes it and the goal it serves.
+    nonisolated static func hoverHelp(for task: TaskItem, goal: Goal?) -> String {
+        var lines = [task.title.isEmpty ? "Untitled task" : task.title]
+        if !task.notes.isEmpty {
+            lines.append(task.notes)
+        }
+        for item in task.checklist {
+            lines.append("\(item.done ? "☑" : "☐") \(item.text)")
+        }
+        if !task.doneWhen.isEmpty {
+            lines.append("Done when: \(task.doneWhen)")
+        }
+        if let goal {
+            lines.append("Goal: \(goal.title)")
+        }
+        return lines.joined(separator: "\n")
     }
 
     private var subtitle: String {

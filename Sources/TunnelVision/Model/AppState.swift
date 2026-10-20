@@ -304,7 +304,9 @@ final class AppState {
         doneWhen: String = "",
         goalID: Goal.ID? = nil,
         background: BackgroundInfo? = nil,
-        urlsToOpen: [String] = []
+        urlsToOpen: [String] = [],
+        notes: String = "",
+        checklist: [ChecklistItem] = []
     ) -> TaskItem {
         let task = TaskItem(
             title: title.trimmingCharacters(in: .whitespaces),
@@ -317,7 +319,9 @@ final class AppState {
             doneWhen: doneWhen.trimmingCharacters(in: .whitespacesAndNewlines),
             goalID: goal(id: goalID)?.id,
             background: background,
-            urlsToOpen: Self.cleanedURLs(urlsToOpen)
+            urlsToOpen: Self.cleanedURLs(urlsToOpen),
+            notes: notes.trimmingCharacters(in: .whitespacesAndNewlines),
+            checklist: Self.cleanedChecklist(checklist)
         )
         tasks.append(task)
         if phase == .breakTime {
@@ -337,6 +341,8 @@ final class AppState {
         updated.goalID = goal(id: task.goalID)?.id
         updated.doneWhen = task.doneWhen.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.urlsToOpen = Self.cleanedURLs(task.urlsToOpen)
+        updated.notes = task.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.checklist = Self.cleanedChecklist(task.checklist)
         updated.background = Self.mergedBackground(edited: task.background, stored: tasks[index].background)
         tasks[index] = updated
         persist()
@@ -589,6 +595,15 @@ final class AppState {
     /// keeps the allowlist: the previous preset's rules move into the task's
     /// own overrides, so the task keeps locking the same apps instead of
     /// silently opening up.
+    /// Ticks or unticks one checklist item. Unlike `updateTask` it leaves the
+    /// lock alone, so ticking during a session doesn't reapply it.
+    func setChecklistItem(taskID: TaskItem.ID, itemID: ChecklistItem.ID, done: Bool) {
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }),
+              let item = tasks[index].checklist.firstIndex(where: { $0.id == itemID }) else { return }
+        tasks[index].checklist[item].done = done
+        persist()
+    }
+
     func setTaskPreset(id: TaskItem.ID, presetID: UUID?) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         let previous = tasks[index].presetID.flatMap { pid in presets.first { $0.id == pid } }
@@ -832,6 +847,15 @@ final class AppState {
     /// Entries trimmed, blanks dropped.
     static func cleanedURLs(_ entries: [String]) -> [String] {
         entries.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    /// Trimmed, with blank items dropped.
+    static func cleanedChecklist(_ items: [ChecklistItem]) -> [ChecklistItem] {
+        items.compactMap { item in
+            var item = item
+            item.text = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return item.text.isEmpty ? nil : item
+        }
     }
 
     /// One URL per line, as the task editor shows and reads them.

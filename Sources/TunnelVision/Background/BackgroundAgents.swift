@@ -184,8 +184,17 @@ final class BackgroundAgents {
 
     /// The brief an agent gets for a task.
     nonisolated static func brief(for task: TaskItem) -> String {
-        """
-        \(task.title)
+        var details = ""
+        if !task.notes.isEmpty {
+            details += "\n\n\(task.notes)"
+        }
+        if !task.checklist.isEmpty {
+            details += "\n\nChecklist:\n" + task.checklist
+                .map { "- [\($0.done ? "x" : " ")] \($0.text)" }
+                .joined(separator: "\n")
+        }
+        return """
+        \(task.title)\(details)
 
         Done when: \(task.doneWhen)
 

@@ -44,6 +44,53 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(Rule(bundleID: "  ", scope: .window, pattern: "  ").isComplete)
     }
 
+    func testTaskRowHoverShowsFullTitleDoneWhenAndGoal() {
+        let goal = Goal(title: "Ship the data platform")
+        let task = TaskItem(title: "Write the OpenTofu for data warehouse", durationSeconds: 3000,
+                            doneWhen: "Plan applies cleanly", goalID: goal.id)
+        XCTAssertEqual(
+            TaskRowView.hoverHelp(for: task, goal: goal),
+            "Write the OpenTofu for data warehouse\nDone when: Plan applies cleanly\nGoal: Ship the data platform"
+        )
+        let bare = TaskItem(title: "", durationSeconds: 1500)
+        XCTAssertEqual(TaskRowView.hoverHelp(for: bare, goal: nil), "Untitled task")
+    }
+
+    func testTaskRowHoverListsDescriptionAndChecklist() {
+        let task = TaskItem(title: "Weekly review", durationSeconds: 1500, notes: "Inbox to zero first",
+                            checklist: [ChecklistItem(text: "Inbox", done: true), ChecklistItem(text: "Calendar")])
+        XCTAssertEqual(
+            TaskRowView.hoverHelp(for: task, goal: nil),
+            "Weekly review\nInbox to zero first\n☑ Inbox\n☐ Calendar"
+        )
+    }
+
+    func testNotesAndChecklistRoundTripAndOldArchivesDecode() throws {
+        let task = TaskItem(title: "Weekly review", durationSeconds: 1500, notes: "Inbox first",
+                            checklist: [ChecklistItem(text: "Inbox", done: true), ChecklistItem(text: "Calendar")])
+        let decoded = try JSONDecoder().decode(TaskItem.self, from: JSONEncoder().encode(task))
+        XCTAssertEqual(decoded, task)
+
+        let old = """
+        {"id":"\(UUID().uuidString)","title":"Old","durationSeconds":1500,"overrides":[],"doneDays":[]}
+        """
+        let legacy = try JSONDecoder().decode(TaskItem.self, from: Data(old.utf8))
+        XCTAssertEqual(legacy.notes, "")
+        XCTAssertEqual(legacy.checklist, [])
+
+        let item = try JSONDecoder().decode(ChecklistItem.self, from: Data(#"{"text":"Bare"}"#.utf8))
+        XCTAssertEqual(item.text, "Bare")
+        XCTAssertFalse(item.done)
+    }
+
+    func testRepeatedCopyKeepsDescriptionAndTicks() {
+        let task = TaskItem(title: "Weekly review", durationSeconds: 1500, repeatDaily: true, notes: "Inbox first",
+                            checklist: [ChecklistItem(text: "Inbox", done: true), ChecklistItem(text: "Calendar")])
+        let copy = task.repeatedCopy()
+        XCTAssertEqual(copy.notes, "Inbox first")
+        XCTAssertEqual(copy.checklist, task.checklist)
+    }
+
     func testCodableRoundTrips() throws {
         let task = TaskItem(
             title: "Write the plan",
