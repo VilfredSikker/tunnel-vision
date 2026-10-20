@@ -151,10 +151,10 @@ struct TaskRowView: View {
     nonisolated static func hoverHelp(for task: TaskItem, goal: Goal?) -> String {
         var lines = [task.title.isEmpty ? "Untitled task" : task.title]
         if !task.notes.isEmpty {
-            lines.append(task.notes)
+            lines.append(LinkText.readable(task.notes))
         }
         for item in task.checklist {
-            lines.append("\(item.done ? "☑" : "☐") \(item.text)")
+            lines.append("\(item.done ? "☑" : "☐") \(LinkText.readable(item.text))")
         }
         if !task.doneWhen.isEmpty {
             lines.append("Done when: \(task.doneWhen)")

@@ -865,7 +865,7 @@ final class AppState {
 
     /// Web pages only: a task or preset can come from an agent, and other
     /// schemes (file, smb, app deep links) would launch things.
-    static func openableURL(_ text: String) -> URL? {
+    nonisolated static func openableURL(_ text: String) -> URL? {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
         let withScheme = trimmed.contains("://") ? trimmed : "https://" + trimmed

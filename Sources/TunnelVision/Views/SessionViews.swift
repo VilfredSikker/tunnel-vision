@@ -100,7 +100,7 @@ struct SessionHeader: View {
     private func taskDetails(_ task: TaskItem) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             if !task.notes.isEmpty {
-                Text(task.notes)
+                Text(LinkText.attributed(task.notes))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(4)

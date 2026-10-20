@@ -14,16 +14,21 @@ struct ChecklistView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(items) { item in
-                Toggle(isOn: Binding(
-                    get: { item.done },
-                    set: { model.setChecklistItem(taskID: taskID, itemID: item.id, done: $0) }
-                )) {
-                    Text(item.text)
+                // The text sits beside the checkbox, not in its label, so a
+                // click on a link opens it instead of ticking the item.
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Toggle("", isOn: Binding(
+                        get: { item.done },
+                        set: { model.setChecklistItem(taskID: taskID, itemID: item.id, done: $0) }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    Text(LinkText.attributed(item.text))
                         .strikethrough(item.done, color: .secondary)
                         .foregroundStyle(item.done ? .secondary : .primary)
                         .fixedSize(horizontal: false, vertical: true)
+                        .help(item.text)
                 }
-                .toggleStyle(.checkbox)
             }
         }
     }
@@ -57,7 +62,7 @@ struct ChecklistBadge: View {
                     .font(.headline)
                     .fixedSize(horizontal: false, vertical: true)
                 if !task.notes.isEmpty {
-                    Text(task.notes)
+                    Text(LinkText.attributed(task.notes))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

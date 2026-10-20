@@ -58,11 +58,36 @@ final class ModelTests: XCTestCase {
 
     func testTaskRowHoverListsDescriptionAndChecklist() {
         let task = TaskItem(title: "Weekly review", durationSeconds: 1500, notes: "Inbox to zero first",
-                            checklist: [ChecklistItem(text: "Inbox", done: true), ChecklistItem(text: "Calendar")])
+                            checklist: [ChecklistItem(text: "Inbox", done: true), ChecklistItem(text: "Review https://github.com/a/b/pull/7")])
         XCTAssertEqual(
             TaskRowView.hoverHelp(for: task, goal: nil),
-            "Weekly review\nInbox to zero first\n☑ Inbox\n☐ Calendar"
+            "Weekly review\nInbox to zero first\n☑ Inbox\n☐ Review a/b#7"
         )
+    }
+
+    func testLinksGetShortReadableLabels() throws {
+        func label(_ text: String) throws -> String {
+            LinkText.shortLabel(for: try XCTUnwrap(URL(string: text)))
+        }
+        XCTAssertEqual(try label("https://github.com/VilfredSikker/tunnel-vision/pull/3/files"), "VilfredSikker/tunnel-vision#3")
+        XCTAssertEqual(try label("https://github.com/VilfredSikker/tunnel-vision/issues/12"), "VilfredSikker/tunnel-vision#12")
+        XCTAssertEqual(try label("https://github.com/VilfredSikker/tunnel-vision"), "VilfredSikker/tunnel-vision")
+        XCTAssertEqual(try label("https://linear.app/reshape/issue/ENG-123/fix-the-thing"), "ENG-123")
+        XCTAssertEqual(try label("https://www.example.com/"), "example.com")
+        XCTAssertEqual(try label("https://substack.com/p/notes"), "substack.com/p/notes")
+        XCTAssertEqual(try label("https://amberliu2.substack.com/p/what-i-learned"), "amberliu2.substack.com/…/what-i-lea…", "cut at 36")
+        XCTAssertEqual(try label("https://docs.example.com/guides/v2/getting-started/setup"), "docs.example.com/…/setup")
+        XCTAssertEqual(try label("https://docs.example.com/a/setup"), "docs.example.com/a/setup", "whole when it fits")
+    }
+
+    func testLinkTextSplitsOutLinksAndSkipsOtherSchemes() {
+        let segments = LinkText.segments("Review github.com/a/b/pull/7 then mail")
+        XCTAssertEqual(segments.map(\.text), ["Review ", "a/b#7", " then mail"])
+        XCTAssertEqual(segments[1].url?.absoluteString, "https://github.com/a/b/pull/7")
+        XCTAssertNil(segments[0].url)
+        XCTAssertEqual(LinkText.readable("See https://docs.example.com/guides/v2/getting-started/setup"), "See docs.example.com/…/setup")
+        XCTAssertEqual(LinkText.segments("Plain text").map(\.text), ["Plain text"])
+        XCTAssertTrue(LinkText.segments("mail me@example.com").allSatisfy { $0.url == nil }, "mailto links are not opened")
     }
 
     func testNotesAndChecklistRoundTripAndOldArchivesDecode() throws {
