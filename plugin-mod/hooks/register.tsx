@@ -60,6 +60,10 @@ type Outcome = { ok: boolean; text: string }
 // variable keeps that path free of host calls.
 let latest: TVState | null = null
 let ticks = 0
+// Polls failed in a row. The status line holds through a few: one that leaves
+// and comes back can move among the other plugins' lines.
+let failedPolls = 0
+const HOLD_POLLS = 3
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -97,8 +101,10 @@ async function refresh($: EngineInterface, checkedOff = false): Promise<Snapshot
     const { state } = await call($, 'state.get')
     const { tasks } = await call($, 'tasks.list')
     next = { state: state as TVState, tasks: tasks as Task[], fetchedAt: await $.clock.now(), error: null }
+    failedPolls = 0
   } catch (error) {
     next = { ...EMPTY, fetchedAt: await $.clock.now(), error: message(error) }
+    failedPolls += 1
   }
   latest = next.state
   await update($, snapshot, () => next)
@@ -115,6 +121,7 @@ async function refresh($: EngineInterface, checkedOff = false): Promise<Snapshot
 
 async function paint($: EngineInterface): Promise<void> {
   const snap = await read($, snapshot)
+  if (snap.error && failedPolls < HOLD_POLLS) return
   const left = snap.state ? remaining(snap.state, snap.fetchedAt, await $.clock.now()) : undefined
   $.ui.status(statusText(snap.state, left))
 }

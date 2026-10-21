@@ -536,3 +536,32 @@ describe('sortedTasks', () => {
     expect(sortedTasks(list, 'created').map(t => t.id)).toEqual(['H2', 'L1', 'M1', 'H1'])
   })
 })
+
+// A status line that leaves and comes back can move among the other plugins'
+// lines, so one failed poll must not blink it out.
+test('a failed poll keeps the status line; three in a row clear it', async ($, on) => {
+  const answer = fakeApp(() => working(parser), [])
+  let isDown = false
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/Users/test' })
+  on('process.run', ($, e) =>
+    isDown
+      ? { value: { exitCode: 1, stdout: '', stderr: 'refused', isStdoutTruncated: false, isStderrTruncated: false } }
+      : answer(e.argv, e.init?.stdin),
+  )
+  const statuses: (string | undefined)[] = []
+  on('ui.status', ($, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'tv' } }))
+  await $.session.start({ source: 'startup', cwd: '/tmp' } as never)
+  expect(statuses.at(-1)).toMatch(/^◉ Draft the parser/)
+
+  isDown = true
+  await clock.advance(10_000)
+  expect(statuses).not.toContain(undefined)
+  await clock.advance(5_000)
+  expect(statuses.at(-1)).toBeUndefined()
+})
