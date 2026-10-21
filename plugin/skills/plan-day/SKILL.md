@@ -22,7 +22,7 @@ The Tunnel Vision tools are named `tunnelvision_*`; they may carry a server pref
 3. **Shape.** Read `../TASK-SHAPE.md`, then check the list against it:
    - A task without `done_when`, or with one that can't be checked: propose one.
    - A vague title: rewrite it verb-first.
-   - A task too big for one session: propose duplicating the task (`tunnelvision_duplicate_task`) for steady work, or a goal with its first steps (the `break-down` skill does this in full).
+   - A task too big for one pomodoro (over 50 minutes, or a done_when one session can't reach): propose duplicating the task (`tunnelvision_duplicate_task`) for steady work, or a goal with its first steps (the `break-down` skill does this in full).
    - An open goal with no runway: propose its next step.
    Done: every open task and every proposed task passes `../TASK-SHAPE.md`.
 4. **Plan.** Order the open tasks into the capacity:
